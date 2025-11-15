@@ -1,17 +1,6 @@
-"""
-main.py
-
-Single-file FastAPI app that:
-- Scans Bybit USDT perpetuals for MACD multi-timeframe signals (root 1h/4h)
-- Subscribes lightweight public WS (auto-detect topic template) for 5m/15m klines for active root signals
-- Authenticated private WS (best-effort) to receive order/trade/position updates
-- Persistent SQLite storage (signals, trades, subscriptions, raw WS messages)
-- Debug endpoint to dump recent raw WS messages
-- Private-topic bookkeeping with persistent subscriptions and unsubscribe on root expiry
-- Bracket order creation (market entry + stop-market) persisted in DB
-
-Run: uvicorn main:app --host 0.0.0.0 --port 8000
-"""
+# main.py
+# Bybit MACD multi-timeframe scanner — updated with admin auth and raw WS message limits.
+# Configure via environment variables. Defaults provided for quick local/test instance.
 
 import os
 import time
@@ -27,16 +16,13 @@ from typing import Dict, Any, List, Optional
 import httpx
 import aiosqlite
 import websockets
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Depends, Header, HTTPException, status
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# -------------------------
-# Config (env)
-# -------------------------
-APP_NAME = "bybit-macd-scanner"
+# ---------- Configuration / env ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
@@ -49,27 +35,37 @@ ROOT_SCAN_LOOKBACK = int(os.getenv("ROOT_SCAN_LOOKBACK", "3"))
 DB_PATH = os.getenv("DB_PATH", "scanner.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
 
-BYBIT_HOST = "https://api.bybit.com" if BYBIT_USE_MAINNET else "https://api-testnet.bybit.com"
-BYBIT_WS_PUBLIC = "wss://stream.bybit.com/realtime_public" if BYBIT_USE_MAINNET else "wss://stream-testnet.bybit.com/realtime_public"
-BYBIT_WS_PRIVATE = "wss://stream.bybit.com/realtime_private" if BYBIT_USE_MAINNET else "wss://stream-testnet.bybit.com/realtime_private"
+# New security / persistence settings
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")  # protect admin endpoints; set in production
+MAX_RAW_WS_MESSAGES = int(os.getenv("MAX_RAW_WS_MESSAGES", "1000"))  # prune raw messages to this count
+MAX_RAW_WS_MSG_BYTES = int(os.getenv("MAX_RAW_WS_MSG_BYTES", "2048"))  # truncate message length
 
-PUBLIC_SYMBOLS_ENDPOINT = "/v5/market/symbols"
-KLINE_ENDPOINT = "/v5/market/kline"
-WALLET_BALANCE_ENDPOINT = "/v5/account/wallet-balance"
-ORDER_CREATE_ENDPOINT = "/v5/order/create"
-STOP_ORDER_CREATE_ENDPOINT = "/v5/stop-order/create"
+# Hosts & endpoints
+MAINNET_API_HOST = "https://api.bybit.com"
+TESTNET_API_HOST = "https://api-testnet.bybit.com"
+PRIMARY_API_HOST = MAINNET_API_HOST if BYBIT_USE_MAINNET else TESTNET_API_HOST
+API_HOSTS = [PRIMARY_API_HOST]
+if PRIMARY_API_HOST == MAINNET_API_HOST:
+    API_HOSTS.append(TESTNET_API_HOST)
+else:
+    API_HOSTS.append(MAINNET_API_HOST)
+
+PUBLIC_WS_URL = "wss://stream.bybit.com/realtime_public" if BYBIT_USE_MAINNET else "wss://stream-testnet.bybit.com/realtime_public"
+PRIVATE_WS_URL = "wss://stream.bybit.com/realtime_private" if BYBIT_USE_MAINNET else "wss://stream-testnet.bybit.com/realtime_private"
+
+PUBLIC_ENDPOINT_CANDIDATES = [
+    "/v5/market/symbols",
+    "/v5/market/tickers",
+    "/v2/public/symbols",
+    "/v2/public/tickers",
+]
+KLINE_ENDPOINTS_TO_TRY = [
+    "/v5/market/kline",
+    "/v2/public/kline/list",
+    "/v2/public/kline",
+]
 
 TF_MAP = {"5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-MACD_FAST = int(os.getenv("MACD_FAST", "12"))
-MACD_SLOW = int(os.getenv("MACD_SLOW", "26"))
-MACD_SIGNAL = int(os.getenv("MACD_SIGNAL", "9"))
-LEVERAGE = int(os.getenv("LEVERAGE", "3"))
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.015"))
-BREAKEVEN_PCT = float(os.getenv("BREAKEVEN_PCT", "0.005"))
-MIN_COIN_AGE_DAYS = int(os.getenv("MIN_COIN_AGE_DAYS", "60"))
-STABLECOINS = {"USDT", "BUSD", "USDC", "TUSD", "DAI"}
-
-# Candidate WS public topic templates for auto-detect
 CANDIDATE_PUBLIC_TEMPLATES = [
     "klineV2.{interval}.{symbol}",
     "kline.{symbol}.{interval}",
@@ -78,25 +74,27 @@ CANDIDATE_PUBLIC_TEMPLATES = [
     "kline:{interval}:{symbol}",
 ]
 
-# -------------------------
-# Globals
-# -------------------------
+MACD_FAST = int(os.getenv("MACD_FAST", "12"))
+MACD_SLOW = int(os.getenv("MACD_SLOW", "26"))
+MACD_SIGNAL = int(os.getenv("MACD_SIGNAL", "9"))
+LEVERAGE = int(os.getenv("LEVERAGE", "3"))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.015"))
+BREAKEVEN_PCT = float(os.getenv("BREAKEVEN_PCT", "0.005"))
+STABLECOINS = {"USDT", "BUSD", "USDC", "TUSD", "DAI"}
+
+# ---------- Globals ----------
 app = FastAPI()
 httpx_client = httpx.AsyncClient(timeout=20)
 db: Optional[aiosqlite.Connection] = None
 
-# In-memory indexes
 symbols_cache: Optional[List[Dict[str, Any]]] = None
 active_root_signals: Dict[str, Dict[str, Any]] = {}
 last_root_processed: Dict[str, int] = {}
 
-# WS managers (set at startup)
 public_ws = None
 private_ws = None
 
-# -------------------------
-# Utilities
-# -------------------------
+# ---------- Utilities ----------
 def log(*args, **kwargs):
     if LOG_LEVEL != "none":
         ts = datetime.now(timezone.utc).isoformat()
@@ -118,9 +116,32 @@ async def send_telegram(text: str):
     except Exception as e:
         log("Telegram error:", e)
 
-# -------------------------
-# EMA / MACD functions
-# -------------------------
+# ---------- Admin auth dependency ----------
+async def require_admin_auth(authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)):
+    """
+    Protect admin endpoints with ADMIN_API_KEY.
+    Accepts:
+      Authorization: Bearer <ADMIN_API_KEY>
+      or X-API-KEY: <ADMIN_API_KEY>
+    If ADMIN_API_KEY not set, endpoints remain unprotected but a warning is logged.
+    """
+    if not ADMIN_API_KEY:
+        log("WARNING: ADMIN_API_KEY not set — admin endpoints are UNPROTECTED. Set ADMIN_API_KEY in env for production.")
+        return
+    token = None
+    if authorization:
+        auth = authorization.strip()
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+        else:
+            token = auth
+    if x_api_key:
+        token = x_api_key.strip()
+    if not token or token != ADMIN_API_KEY:
+        log("Admin auth failed")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+# ---------- EMA / MACD ----------
 def ema(values: List[float], period: int) -> List[float]:
     if not values or period <= 0:
         return []
@@ -144,18 +165,30 @@ def macd_hist(prices: List[float], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_S
     padding = len(prices) - len(hist)
     return [None] * padding + hist
 
-# -------------------------
-# Bybit REST helpers
-# -------------------------
+# ---------- Resilient public GET ----------
+async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = None, timeout: int = 12) -> Optional[Dict[str, Any]]:
+    for host in API_HOSTS:
+        for ep in endpoints:
+            url = host + ep
+            try:
+                r = await httpx_client.get(url, params=params or {}, timeout=timeout)
+            except Exception as e:
+                log("Network error for", url, "->", e)
+                continue
+            if r.status_code == 200:
+                try:
+                    return r.json()
+                except Exception:
+                    log("Invalid JSON from", url)
+                    continue
+            else:
+                log("Public GET", url, "returned", r.status_code)
+    return None
+
+# ---------- Signed request ----------
 def bybit_sign_v5(api_secret: str, timestamp: str, method: str, path: str, body: str) -> str:
     prehash = timestamp + method + path + body
     return hmac.new(api_secret.encode(), prehash.encode(), hashlib.sha256).hexdigest()
-
-async def bybit_public(endpoint: str, params: Dict[str, Any] = None):
-    url = BYBIT_HOST + endpoint
-    r = await httpx_client.get(url, params=params)
-    r.raise_for_status()
-    return r.json()
 
 async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, Any] = None):
     ts = str(int(time.time() * 1000))
@@ -167,85 +200,36 @@ async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, An
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-SIGN": signature,
     }
-    url = BYBIT_HOST + endpoint
-    if method.upper() == "GET":
-        r = await httpx_client.get(url, params=payload or {}, headers=headers)
-    else:
-        r = await httpx_client.post(url, content=body or "{}", headers=headers)
+    url = PRIMARY_API_HOST + endpoint
     try:
-        return r.json()
-    except Exception:
-        r.raise_for_status()
+        if method.upper() == "GET":
+            r = await httpx_client.get(url, params=payload or {}, headers=headers)
+        else:
+            r = await httpx_client.post(url, content=body or "{}", headers=headers)
+        try:
+            return r.json()
+        except Exception:
+            log("Signed request returned non-json", await r.text())
+            return {}
+    except Exception as e:
+        log("Signed request error:", e)
+        return {}
 
-# -------------------------
-# SQLite init & helpers
-# -------------------------
+# ---------- SQLite init & helpers ----------
 async def init_db():
     global db
     db = await aiosqlite.connect(DB_PATH)
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS root_signals (
-            id TEXT PRIMARY KEY,
-            symbol TEXT,
-            root_tf TEXT,
-            flip_time INTEGER,
-            flip_price REAL,
-            status TEXT,
-            created_at INTEGER
-        )
-        """
-    )
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades (
-            id TEXT PRIMARY KEY,
-            symbol TEXT,
-            side TEXT,
-            qty REAL,
-            entry_price REAL,
-            sl_price REAL,
-            created_at INTEGER,
-            open BOOLEAN,
-            raw_response TEXT
-        )
-        """
-    )
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS raw_ws_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT,
-            topic TEXT,
-            message TEXT,
-            created_at INTEGER
-        )
-        """
-    )
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS private_subscriptions (
-            topic TEXT PRIMARY KEY,
-            created_at INTEGER
-        )
-        """
-    )
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS public_subscriptions (
-            topic TEXT PRIMARY KEY,
-            created_at INTEGER
-        )
-        """
-    )
+    await db.execute("""CREATE TABLE IF NOT EXISTS root_signals (id TEXT PRIMARY KEY, symbol TEXT, root_tf TEXT, flip_time INTEGER, flip_price REAL, status TEXT, created_at INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS trades (id TEXT PRIMARY KEY, symbol TEXT, side TEXT, qty REAL, entry_price REAL, sl_price REAL, created_at INTEGER, open BOOLEAN, raw_response TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS raw_ws_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, topic TEXT, message TEXT, created_at INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS public_subscriptions (topic TEXT PRIMARY KEY, created_at INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS private_subscriptions (topic TEXT PRIMARY KEY, created_at INTEGER)""")
     await db.commit()
     log("DB initialized at", DB_PATH)
 
 async def persist_root_signal(sig: Dict[str, Any]):
-    await db.execute(
-        "INSERT OR REPLACE INTO root_signals (id,symbol,root_tf,flip_time,flip_price,status,created_at) VALUES (?,?,?,?,?,?,?)",
-        (sig["id"], sig["symbol"], sig["root_tf"], sig["root_flip_time"], sig["root_flip_price"], sig.get("status", "watching"), sig["created_at"]),
-    )
+    await db.execute("INSERT OR REPLACE INTO root_signals (id,symbol,root_tf,flip_time,flip_price,status,created_at) VALUES (?,?,?,?,?,?,?)",
+                     (sig["id"], sig["symbol"], sig["root_tf"], sig["root_flip_time"], sig["root_flip_price"], sig.get("status", "watching"), sig["created_at"]))
     await db.commit()
 
 async def remove_root_signal(sig_id: str):
@@ -253,21 +237,44 @@ async def remove_root_signal(sig_id: str):
     await db.commit()
 
 async def persist_trade(tr: Dict[str, Any]):
-    await db.execute(
-        "INSERT OR REPLACE INTO trades (id,symbol,side,qty,entry_price,sl_price,created_at,open,raw_response) VALUES (?,?,?,?,?,?,?,?,?)",
-        (tr["id"], tr["symbol"], tr["side"], tr["qty"], tr.get("entry_price"), tr.get("sl_price"), tr["created_at"], tr.get("open", True), json.dumps(tr.get("raw"))),
-    )
+    await db.execute("INSERT OR REPLACE INTO trades (id,symbol,side,qty,entry_price,sl_price,created_at,open,raw_response) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (tr["id"], tr["symbol"], tr["side"], tr["qty"], tr.get("entry_price"), tr.get("sl_price"), tr["created_at"], tr.get("open", True), json.dumps(tr.get("raw"))))
     await db.commit()
 
 async def update_trade_close(trade_id: str):
     await db.execute("UPDATE trades SET open = 0 WHERE id = ?", (trade_id,))
     await db.commit()
 
+# Updated persist_raw_ws with truncation and pruning
 async def persist_raw_ws(source: str, topic: Optional[str], message: str):
-    await db.execute(
-        "INSERT INTO raw_ws_messages (source,topic,message,created_at) VALUES (?,?,?,?)",
-        (source, topic or "", message, now_ts_ms()),
-    )
+    """
+    Save raw websocket messages with truncation and DB pruning to avoid unbounded growth.
+    """
+    try:
+        if not isinstance(message, str):
+            message = str(message)
+        if len(message) > MAX_RAW_WS_MSG_BYTES:
+            message = message[:MAX_RAW_WS_MSG_BYTES] + "...[TRUNCATED]"
+        await db.execute("INSERT INTO raw_ws_messages (source,topic,message,created_at) VALUES (?,?,?,?)",
+                         (source, topic or "", message, now_ts_ms()))
+        await db.commit()
+        # prune oldest rows if over limit
+        async with db.execute("SELECT COUNT(*) FROM raw_ws_messages") as cur:
+            row = await cur.fetchone()
+            total = row[0] if row else 0
+        if total > MAX_RAW_WS_MESSAGES:
+            to_delete = total - MAX_RAW_WS_MESSAGES
+            await db.execute("DELETE FROM raw_ws_messages WHERE id IN (SELECT id FROM raw_ws_messages ORDER BY id ASC LIMIT ?)", (to_delete,))
+            await db.commit()
+    except Exception as e:
+        log("persist_raw_ws error:", e)
+
+async def add_public_subscription(topic: str):
+    await db.execute("INSERT OR REPLACE INTO public_subscriptions (topic,created_at) VALUES (?,?)", (topic, now_ts_ms()))
+    await db.commit()
+
+async def remove_public_subscription(topic: str):
+    await db.execute("DELETE FROM public_subscriptions WHERE topic = ?", (topic,))
     await db.commit()
 
 async def add_private_subscription(topic: str):
@@ -278,72 +285,78 @@ async def remove_private_subscription(topic: str):
     await db.execute("DELETE FROM private_subscriptions WHERE topic = ?", (topic,))
     await db.commit()
 
-async def add_public_subscription(topic: str):
-    await db.execute("INSERT OR REPLACE INTO public_subscriptions (topic,created_at) VALUES (?,?)", (topic, now_ts_ms()))
-    await db.commit()
-
-async def remove_public_subscription(topic: str):
-    await db.execute("DELETE FROM public_subscriptions WHERE topic = ?", (topic,))
-    await db.commit()
-
-# -------------------------
-# Symbols & klines
-# -------------------------
+# ---------- Symbols & klines ----------
 async def get_tradable_usdt_symbols() -> List[str]:
     global symbols_cache
     if symbols_cache:
         return [s["name"] for s in symbols_cache]
-    try:
-        data = await bybit_public(PUBLIC_SYMBOLS_ENDPOINT, {})
-        result = data.get("result") or []
-        symbols = []
-        for item in result:
-            name = item.get("name")
-            if not name:
-                continue
-            if name.endswith("USDT"):
-                base = name.replace("USDT", "")
-                if base.upper() in STABLECOINS:
-                    continue
-                symbols.append(item)
-        symbols_cache = symbols
-        return [s["name"] for s in symbols if s.get("name")]
-    except Exception as e:
-        log("Error fetching symbols:", e)
+    res = await resilient_public_get(PUBLIC_ENDPOINT_CANDIDATES, params={})
+    if not res:
+        log("Symbol discovery failed on all endpoints/hosts")
         return []
+    result_list = res.get("result") or res.get("data") or res.get("symbols") or res.get("list") or []
+    symbols = []
+    for item in result_list:
+        name = None
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("symbol") or item.get("symbolName") or item.get("s")
+        else:
+            name = str(item)
+        if not name:
+            continue
+        if name.endswith("USDT"):
+            base = name.replace("USDT", "")
+            if base.upper() in STABLECOINS:
+                continue
+            symbols.append({"name": name, "raw": item})
+    symbols_cache = symbols
+    log("Discovered", len(symbols), "USDT symbols")
+    return [s["name"] for s in symbols if s.get("name")]
 
 async def fetch_klines(symbol: str, timeframe: str, limit: int = 100) -> List[Dict[str, Any]]:
     params = {"symbol": symbol, "interval": timeframe, "limit": limit}
-    try:
-        data = await bybit_public(KLINE_ENDPOINT, params)
-        res = data.get("result", {})
-        klines = []
-        if isinstance(res, dict) and "list" in res:
-            klines = res["list"]
-        elif isinstance(res, list):
-            klines = res
-        elif isinstance(data, dict) and "result" in data and isinstance(data["result"], list):
-            klines = data["result"]
-        else:
-            log("Unexpected kline payload:", data)
-            return []
-        out = []
-        for k in klines:
-            o = float(k.get("open", 0))
-            c = float(k.get("close", 0))
-            h = float(k.get("high", 0))
-            l = float(k.get("low", 0))
-            start = int(k.get("start", k.get("open_time", 0)))
-            end = int(k.get("end", k.get("close_time", 0)))
-            out.append({"open": o, "high": h, "low": l, "close": c, "start": start, "end": end})
-        return out
-    except Exception as e:
-        log("fetch_klines error:", e)
-        return []
+    for host in API_HOSTS:
+        for ep in KLINE_ENDPOINTS_TO_TRY:
+            url = host + ep
+            try:
+                r = await httpx_client.get(url, params=params, timeout=12)
+            except Exception as e:
+                log("Kline network error", url, e)
+                continue
+            if r.status_code != 200:
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                log("Invalid JSON from", url)
+                continue
+            res = data.get("result") or data.get("data") or data.get("list") or []
+            klist = []
+            if isinstance(res, dict) and "list" in res:
+                klist = res["list"]
+            elif isinstance(res, list):
+                klist = res
+            elif isinstance(data.get("result"), dict) and "list" in data["result"]:
+                klist = data["result"]["list"]
+            # normalize
+            klines = []
+            for k in klist:
+                try:
+                    o = float(k.get("open", k.get("Open", 0)))
+                    c = float(k.get("close", k.get("Close", 0)))
+                    h = float(k.get("high", 0))
+                    l = float(k.get("low", 0))
+                    start = int(k.get("start", k.get("open_time", k.get("t", 0))))
+                    end = int(k.get("end", k.get("close_time", 0)))
+                    klines.append({"open": o, "high": h, "low": l, "close": c, "start": start, "end": end})
+                except Exception:
+                    continue
+            if klines:
+                return klines
+    log("fetch_klines: no klines found for", symbol, timeframe)
+    return []
 
-# -------------------------
-# Signal detection utilities
-# -------------------------
+# ---------- Signal utilities ----------
 def check_macd_flip_recent(klines: List[Dict[str, Any]], lookback: int = ROOT_SCAN_LOOKBACK) -> Optional[int]:
     closes = [k["close"] for k in klines]
     hist = macd_hist(closes)
@@ -372,19 +385,16 @@ def macd_positive(klines: List[Dict[str, Any]]) -> bool:
     last = hist[-1]
     return bool(last and last > 0)
 
-# -------------------------
-# Trading helpers
-# -------------------------
+# ---------- Trading helpers ----------
 async def get_account_usdt_balance() -> float:
     if not BYBIT_API_KEY or not BYBIT_API_SECRET or not TRADING_ENABLED:
         simulated = 1000.0
         return simulated
     try:
-        res = await bybit_signed_request("GET", WALLET_BALANCE_ENDPOINT, {"coin": "USDT"})
+        res = await bybit_signed_request("GET", "/v5/account/wallet-balance", {"coin": "USDT"})
         result = res.get("result") or {}
-        coin_data = result.get("USDT") or {}
-        available = float(coin_data.get("availableBalance") or coin_data.get("available_balance") or 0)
-        total = float(coin_data.get("walletBalance") or coin_data.get("wallet_balance") or available)
+        coin = result.get("USDT") or {}
+        total = float(coin.get("walletBalance") or coin.get("wallet_balance") or coin.get("availableBalance") or 0)
         return total
     except Exception as e:
         log("get_account_usdt_balance error:", e)
@@ -401,124 +411,44 @@ async def place_market_entry_and_stop(symbol: str, side: str, qty: float, stop_p
         klines = await fetch_klines(symbol, TF_MAP["5m"], limit=2)
         entry_price = klines[-1]["close"] if klines else 0.0
         trade_id = f"sim-{symbol}-{int(time.time())}"
-        tr = {
-            "id": trade_id,
-            "symbol": symbol,
-            "side": side,
-            "qty": qty,
-            "entry_price": entry_price,
-            "sl_price": stop_price,
-            "created_at": now_ts_ms(),
-            "open": True,
-            "raw": {"simulated": True},
-        }
+        tr = {"id": trade_id, "symbol": symbol, "side": side, "qty": qty, "entry_price": entry_price, "sl_price": stop_price, "created_at": now_ts_ms(), "open": True, "raw": {"simulated": True}}
         await persist_trade(tr)
-        # subscribe private topic for orders for this symbol (best-effort)
         if private_ws:
-            topic = f"order.{symbol}"
-            await private_ws.subscribe_topic(topic)
+            await private_ws.subscribe_topic(f"order.{symbol}")
         await send_telegram(f"[SIM] Entered {symbol} {side} qty={qty} entry={entry_price} SL={stop_price}")
         return {"retCode": 0, "result": tr}
     try:
-        entry_payload = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": side,
-            "orderType": "Market",
-            "qty": str(qty),
-            "timeInForce": "ImmediateOrCancel",
-            "reduceOnly": False,
-            "closeOnTrigger": False,
-        }
-        entry_res = await bybit_signed_request("POST", ORDER_CREATE_ENDPOINT, entry_payload)
-        log("Entry order response:", entry_res)
+        entry_payload = {"category": "linear", "symbol": symbol, "side": side, "orderType": "Market", "qty": str(qty), "timeInForce": "ImmediateOrCancel", "reduceOnly": False, "closeOnTrigger": False}
+        entry_res = await bybit_signed_request("POST", "/v5/order/create", entry_payload)
         res_obj = entry_res.get("result") or {}
         entry_id = res_obj.get("orderId") or res_obj.get("order_id") or f"by-{int(time.time())}"
         filled_avg = res_obj.get("filled_avg_price") or res_obj.get("filledAvgPrice")
         entry_price = float(filled_avg) if filled_avg else None
-        # Stop order
-        stop_side = "Sell" if side.lower() == "buy" or side == "Buy" else "Buy"
-        stop_payload = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": stop_side,
-            "orderType": "Market",
-            "qty": str(qty),
-            "triggerBy": "LastPrice",
-            "basePrice": None,
-            "triggerPrice": str(stop_price),
-            "timeInForce": "ImmediateOrCancel",
-        }
-        stop_res = await bybit_signed_request("POST", STOP_ORDER_CREATE_ENDPOINT, stop_payload)
-        log("Stop order response:", stop_res)
-        trade_id = entry_id
-        tr = {
-            "id": trade_id,
-            "symbol": symbol,
-            "side": side,
-            "qty": qty,
-            "entry_price": entry_price,
-            "sl_price": stop_price,
-            "created_at": now_ts_ms(),
-            "open": True,
-            "raw": {"entry": entry_res, "stop": stop_res},
-        }
+        stop_side = "Sell" if side.lower() in ("buy", "long") else "Buy"
+        stop_payload = {"category": "linear", "symbol": symbol, "side": stop_side, "orderType": "Market", "qty": str(qty), "triggerBy": "LastPrice", "basePrice": None, "triggerPrice": str(stop_price), "timeInForce": "ImmediateOrCancel"}
+        stop_res = await bybit_signed_request("POST", "/v5/stop-order/create", stop_payload)
+        tr = {"id": entry_id, "symbol": symbol, "side": side, "qty": qty, "entry_price": entry_price, "sl_price": stop_price, "created_at": now_ts_ms(), "open": True, "raw": {"entry": entry_res, "stop": stop_res}}
         await persist_trade(tr)
-        # subscribe private topic for order updates for this symbol (best-effort)
         if private_ws:
-            topic = f"order.{symbol}"
-            await private_ws.subscribe_topic(topic)
-        await send_telegram(f"Order placed {symbol} side={side} qty={qty} (entry id={entry_id})")
+            await private_ws.subscribe_topic(f"order.{symbol}")
+        await send_telegram(f"Order placed {symbol} side={side} qty={qty} entry_id={entry_id}")
         return {"retCode": 0, "result": tr}
     except Exception as e:
         log("place_market_entry_and_stop error:", e)
         return {"retCode": -1, "retMsg": str(e)}
 
-# -------------------------
-# Websocket: Public manager (auto-detect templates, decompress, backoff)
-# -------------------------
+# ---------- WebSocket managers (public & private) ----------
 class PublicWebsocketManager:
     def __init__(self, ws_url: str, detect_symbol: str = "BTCUSDT"):
         self.ws_url = ws_url
         self.conn = None
         self.detect_template: Optional[str] = None
-        self.subscribed_topics: set = set()  # store formatted topic strings
+        self.subscribed_topics: set = set()
         self.detect_symbol = detect_symbol
         self._recv_task = None
         self._lock = asyncio.Lock()
         self._reconnect_backoff = 1
         self._stop = False
-
-    async def connect_and_detect(self, timeout: float = 8.0):
-        ok = await self._connect()
-        if not ok:
-            return False
-        try:
-            detected = await self._auto_detect_template(timeout=timeout)
-            if detected:
-                self.detect_template = detected
-                log("Auto-detected public WS template:", detected)
-            else:
-                log("Public WS auto-detect failed; will attempt on-the-fly subscriptions")
-        except Exception as e:
-            log("Public WS detect error:", e)
-        if not self._recv_task:
-            self._recv_task = asyncio.create_task(self._recv_loop())
-        return True
-
-    async def _connect(self) -> bool:
-        backoff = self._reconnect_backoff
-        while not self._stop:
-            try:
-                self.conn = await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10, max_size=2**24)
-                log("Public WS connected to", self.ws_url)
-                self._reconnect_backoff = 1
-                return True
-            except Exception as e:
-                log("Public WS connect failed:", e, "retrying in", backoff, "s")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-        return False
 
     def _maybe_decompress(self, msg):
         try:
@@ -541,6 +471,36 @@ class PublicWebsocketManager:
         except Exception:
             return None
 
+    async def connect_and_detect(self, timeout: float = 8.0):
+        if not await self._connect():
+            return False
+        try:
+            detected = await self._auto_detect_template(timeout=timeout)
+            if detected:
+                self.detect_template = detected
+                log("Public WS template detected:", detected)
+            else:
+                log("Public WS auto-detect failed; will attempt on-the-fly")
+        except Exception as e:
+            log("Public detect error:", e)
+        if not self._recv_task:
+            self._recv_task = asyncio.create_task(self._recv_loop())
+        return True
+
+    async def _connect(self):
+        backoff = self._reconnect_backoff
+        while not self._stop:
+            try:
+                self.conn = await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10, max_size=2**24)
+                log("Public WS connected")
+                self._reconnect_backoff = 1
+                return True
+            except Exception as e:
+                log("Public WS connect failed:", e, "retrying in", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+        return False
+
     async def _auto_detect_template(self, timeout: float = 8.0) -> Optional[str]:
         async def _recv_for(seconds: float, expect_topics: set):
             end = time.time() + seconds
@@ -556,7 +516,6 @@ class PublicWebsocketManager:
                     obj = json.loads(body)
                 except Exception:
                     continue
-                # subscribe ack
                 if isinstance(obj, dict):
                     if obj.get("success") is True and isinstance(obj.get("request"), dict):
                         args = obj["request"].get("args") or []
@@ -581,8 +540,7 @@ class PublicWebsocketManager:
                 t1 = tmpl.format(interval="5", symbol=self.detect_symbol)
                 t2 = tmpl.format(interval="15", symbol=self.detect_symbol)
                 topics = [t1, t2]
-                sub_msg = json.dumps({"op": "subscribe", "args": topics})
-                await self.conn.send(sub_msg)
+                await self.conn.send(json.dumps({"op": "subscribe", "args": topics}))
                 ok, obj = await _recv_for(timeout, set(topics))
                 if ok:
                     return tmpl
@@ -590,8 +548,7 @@ class PublicWebsocketManager:
                     await self.conn.send(json.dumps({"op": "unsubscribe", "args": topics}))
                 except Exception:
                     pass
-            except Exception as e:
-                log("Error testing template", tmpl, e)
+            except Exception:
                 continue
         return None
 
@@ -609,13 +566,11 @@ class PublicWebsocketManager:
                     obj = json.loads(body)
                 except Exception:
                     continue
-                # persist raw message
                 topic = obj.get("topic") or (obj.get("arg") or {}).get("topic") or ""
                 await persist_raw_ws("public", topic, json.dumps(obj))
-                # dispatch
                 asyncio.create_task(self.handle_message(obj))
             except Exception as e:
-                log("Public WS recv error/disconnected:", e)
+                log("Public WS recv error/disconnect:", e)
                 try:
                     if self.conn:
                         await self.conn.close()
@@ -628,16 +583,14 @@ class PublicWebsocketManager:
     async def handle_message(self, obj):
         topic = obj.get("topic") or (obj.get("arg") or {}).get("topic") or obj.get("type")
         data = obj.get("data") or []
-        # If kline messages:
         if topic and "kline" in str(topic):
-            # parse topic like klineV2.5.BTCUSDT or kline:BTCUSDT:5 etc
             topic_str = str(topic)
             sep = "." if "." in topic_str else ":"
             parts = topic_str.split(sep)
             interval_token = None
             symbol_token = None
             for p in parts:
-                if p.isdigit() or (p.endswith("m") or p.endswith("h") or p in TF_MAP.values()):
+                if p.isdigit() or p.endswith("m") or p.endswith("h") or p in TF_MAP.values():
                     interval_token = p
                 if p.endswith("USDT"):
                     symbol_token = p
@@ -658,7 +611,6 @@ class PublicWebsocketManager:
                 if symbol_token and interval_label and close is not None:
                     await on_kline_event(symbol_token, interval_label, {"start": start, "close": close})
                     return
-        # fallback: nested shapes
         if isinstance(data, list) and data:
             first = data[0]
             symbol = first.get("symbol") or first.get("s")
@@ -679,7 +631,6 @@ class PublicWebsocketManager:
                     interval_label = interval
                 if interval_label:
                     await on_kline_event(symbol, interval_label, {"start": start, "close": close})
-                    return
 
     async def _resubscribe_all(self):
         if not self.subscribed_topics:
@@ -693,7 +644,6 @@ class PublicWebsocketManager:
             log("Failed to re-subscribe public topics:", e)
 
     async def subscribe_kline(self, symbol: str, interval_token: str):
-        # interval_token is bybit interval string like "5" or "15"
         if self.detect_template:
             topic = self.detect_template.format(interval=interval_token, symbol=symbol)
             async with self._lock:
@@ -718,7 +668,6 @@ class PublicWebsocketManager:
                         continue
                     try:
                         await self.conn.send(json.dumps({"op": "subscribe", "args": [topic]}))
-                        # wait briefly for ack or message
                         try:
                             msg = await asyncio.wait_for(self.conn.recv(), timeout=2.0)
                             body = self._maybe_decompress(msg)
@@ -726,13 +675,13 @@ class PublicWebsocketManager:
                                 self.detect_template = tmpl
                                 self.subscribed_topics.add(topic)
                                 await add_public_subscription(topic)
-                                log("Public WS on-the-fly detected template:", tmpl, "subscribed", topic)
+                                log("On-the-fly detected template:", tmpl, "subscribed", topic)
                                 return True
                         except asyncio.TimeoutError:
                             pass
                     except Exception:
                         continue
-        log("Public subscribe_kline failed for", symbol, interval_token)
+        log("subscribe_kline failed for", symbol, interval_token)
         return False
 
     async def unsubscribe_kline(self, symbol: str, interval_token: str):
@@ -765,9 +714,6 @@ class PublicWebsocketManager:
             pass
         self.conn = None
 
-# -------------------------
-# Websocket: Private manager (auth attempts, subscription bookkeeping)
-# -------------------------
 class PrivateWebsocketManager:
     def __init__(self, ws_url: str, api_key: Optional[str], api_secret: Optional[str]):
         self.ws_url = ws_url
@@ -807,11 +753,11 @@ class PrivateWebsocketManager:
         while not self._stop:
             try:
                 self.conn = await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10, max_size=2**24)
-                log("Private WS connected to", self.ws_url)
+                log("Private WS connected")
                 self._reconnect_backoff = 1
                 return True
             except Exception as e:
-                log("Private WS connect failed:", e, "retrying in", backoff, "s")
+                log("Private WS connect failed:", e, "retrying in", backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
         return False
@@ -828,8 +774,7 @@ class PrivateWebsocketManager:
         return out
 
     async def connect_and_auth(self):
-        ok = await self._connect()
-        if not ok:
+        if not await self._connect():
             return False
         if not self._recv_task:
             self._recv_task = asyncio.create_task(self._recv_loop())
@@ -860,11 +805,10 @@ class PrivateWebsocketManager:
                         obj = json.loads(body)
                     except Exception:
                         continue
-                    # detect success
                     if isinstance(obj, dict) and (obj.get("success") is True or obj.get("ret_code") == 0):
                         self.authenticated = True
-                        log("Private WS auth success with args:", msg["args"])
                         await persist_raw_ws("private", "auth", json.dumps(obj))
+                        log("Private WS auth success")
                         return True
                     await persist_raw_ws("private", "auth_reply", json.dumps(obj))
             except Exception as e:
@@ -903,7 +847,6 @@ class PrivateWebsocketManager:
                 self._reconnect_backoff = min(self._reconnect_backoff * 2 if self._reconnect_backoff > 0 else 1, 60)
 
     async def handle_message(self, obj: dict):
-        # dispatch to on_private_msg
         asyncio.create_task(on_private_msg(obj))
 
     async def subscribe_topic(self, topic: str):
@@ -940,56 +883,43 @@ class PrivateWebsocketManager:
             pass
         self.conn = None
 
-# -------------------------
-# WS event callbacks
-# -------------------------
+# ---------- Event handlers ----------
 async def on_kline_event(symbol: str, interval: str, candle: Dict[str, Any]):
     if not symbol or not interval:
         return
-    # normalize symbol (some messages supply like 'BTCUSDT')
-    # evaluate active root signals for symbol
-    # schedule fast eval
     for key, sig in list(active_root_signals.items()):
         if sig["symbol"] != symbol:
             continue
         root_tf = sig["root_tf"]
-        if root_tf == "1h":
-            check_tfs = ["5m", "15m", "4h", "1d"]
-        else:
-            check_tfs = ["5m", "15m", "1h", "1d"]
+        check_tfs = ["5m", "15m", "4h", "1d"] if root_tf == "1h" else ["5m", "15m", "1h", "1d"]
         if interval not in check_tfs:
             continue
         asyncio.create_task(evaluate_signal_fast(sig["id"]))
 
 async def on_private_msg(obj: dict):
     try:
-        log("Private WS message received (summary)")
         topic = obj.get("topic") or (obj.get("arg") or {}).get("topic") or ""
         data = obj.get("data") or []
         if isinstance(data, list) and data:
             item = data[0]
             order_id = item.get("orderId") or item.get("order_id") or item.get("orderID")
-            symbol = item.get("symbol") or item.get("s")
             status = item.get("orderStatus") or item.get("status") or item.get("execStatus")
             filled_price = item.get("filled_avg_price") or item.get("price") or item.get("avgPrice")
-            if order_id and status:
-                if str(status).lower() in ("filled", "closed", "cancelled", "canceled", "triggered", "filled_partially"):
-                    try:
-                        await update_trade_close(order_id)
-                    except Exception as e:
-                        log("DB update trade close error:", e)
-                    if str(status).lower() == "filled":
-                        await send_telegram(f"Order {order_id} for {symbol} status={status} filled_price={filled_price}")
-        # else: ignore or log verbose in debug mode
+            symbol = item.get("symbol") or item.get("s")
+            if order_id and status and str(status).lower() in ("filled", "closed", "cancelled", "canceled", "triggered"):
+                try:
+                    await update_trade_close(order_id)
+                except Exception as e:
+                    log("DB update error:", e)
+                if str(status).lower() == "filled":
+                    await send_telegram(f"Order {order_id} {symbol} status={status} filled_price={filled_price}")
     except Exception as e:
         log("on_private_msg error:", e)
 
-# -------------------------
-# Scanning & watcher loops
-# -------------------------
+# ---------- Scanning & watcher ----------
 async def root_scanner_loop(root_tf: str):
     tf_token = TF_MAP[root_tf]
-    log("Starting root scanner for", root_tf)
+    log("Root scanner started for", root_tf)
     while True:
         try:
             symbols = await get_tradable_usdt_symbols()
@@ -1008,21 +938,10 @@ async def root_scanner_loop(root_tf: str):
                 if flip_idx is not None:
                     flip_candle = klines[flip_idx]
                     key = f"{symbol}-{root_tf}-{flip_candle['start']}"
-                    sig = {
-                        "id": key,
-                        "symbol": symbol,
-                        "root_tf": root_tf,
-                        "root_flip_time": flip_candle["start"],
-                        "root_flip_candle_end": flip_candle["end"],
-                        "root_flip_price": flip_candle["close"],
-                        "created_at": now_ts_ms(),
-                        "status": "watching",
-                    }
+                    sig = {"id": key, "symbol": symbol, "root_tf": root_tf, "root_flip_time": flip_candle["start"], "root_flip_candle_end": flip_candle["end"], "root_flip_price": flip_candle["close"], "created_at": now_ts_ms(), "status": "watching"}
                     active_root_signals[key] = sig
                     await persist_root_signal(sig)
-                    log("Registered root flip:", key)
                     await send_telegram(f"Root flip detected {symbol} {root_tf} @ {flip_candle['close']}")
-                    # subscribe public 5m/15m
                     if public_ws:
                         await public_ws.subscribe_kline(symbol, TF_MAP["5m"])
                         await public_ws.subscribe_kline(symbol, TF_MAP["15m"])
@@ -1040,23 +959,16 @@ async def evaluate_signal_fast(sig_id: str):
     root_end = sig["root_flip_candle_end"]
     now_ms = now_ts_ms()
     if now_ms > (root_end * 1000):
-        # expired -> cleanup subscriptions
         active_root_signals.pop(sig_id, None)
         await remove_root_signal(sig_id)
         if public_ws:
             await public_ws.unsubscribe_kline(symbol, TF_MAP["5m"])
             await public_ws.unsubscribe_kline(symbol, TF_MAP["15m"])
-        # Also unsubscribe any private topics for this symbol that were persisted
-        # public pattern for private topics used earlier: "order.{symbol}"
-        topic = f"order.{symbol}"
         if private_ws:
-            await private_ws.unsubscribe_topic(topic)
-        log("Signal expired and cleaned up:", sig_id)
+            await private_ws.unsubscribe_topic(f"order.{symbol}")
+        log("Signal expired and cleaned:", sig_id)
         return
-    if root_tf == "1h":
-        check_tfs = ["5m", "15m", "4h", "1d"]
-    else:
-        check_tfs = ["5m", "15m", "1h", "1d"]
+    check_tfs = ["5m", "15m", "4h", "1d"] if root_tf == "1h" else ["5m", "15m", "1h", "1d"]
     alignment_ok = True
     for tf in check_tfs:
         klines = await fetch_klines(symbol, TF_MAP[tf], limit=10)
@@ -1095,10 +1007,9 @@ async def evaluate_signal_fast(sig_id: str):
         await send_telegram(f"Max open trades reached ({MAX_OPEN_TRADES}), skipping entry for {symbol}")
         return
     res = await place_market_entry_and_stop(symbol, side, qty, stop_price)
-    log("Entry/stop result:", res)
+    log("place result:", res)
 
 async def active_signal_watcher_loop():
-    log("Starting active signal watcher")
     while True:
         try:
             for sig_id in list(active_root_signals.keys()):
@@ -1107,28 +1018,28 @@ async def active_signal_watcher_loop():
             log("active_signal_watcher_loop error:", e)
         await asyncio.sleep(60)
 
-# -------------------------
-# Debug endpoints
-# -------------------------
+# ---------- Debug endpoints (protected) ----------
 @app.get("/debug/ws/messages")
-async def debug_ws_messages(limit: int = Query(50, gt=0, le=1000)):
+async def debug_ws_messages(limit: int = Query(50, gt=0, le=1000), _auth=Depends(require_admin_auth)):
     rows = []
     async with db.execute("SELECT id,source,topic,message,created_at FROM raw_ws_messages ORDER BY id DESC LIMIT ?", (limit,)) as cur:
         rows = await cur.fetchall()
     out = []
     for r in rows:
-        out.append({"id": r[0], "source": r[1], "topic": r[2], "message": json.loads(r[3]) if r[3] else None, "created_at": r[4]})
+        try:
+            msg = json.loads(r[3]) if r[3] else None
+        except Exception:
+            msg = r[3]
+        out.append({"id": r[0], "source": r[1], "topic": r[2], "message": msg, "created_at": r[4]})
     return {"count": len(out), "messages": out}
 
 @app.post("/debug/ws/clear")
-async def debug_ws_clear():
+async def debug_ws_clear(_auth=Depends(require_admin_auth)):
     await db.execute("DELETE FROM raw_ws_messages")
     await db.commit()
     return {"cleared": True}
 
-# -------------------------
-# Status / control endpoints
-# -------------------------
+# ---------- Status / control (protected) ----------
 class ToggleRequest(BaseModel):
     trading_enabled: Optional[bool] = None
     max_open_trades: Optional[int] = None
@@ -1138,7 +1049,7 @@ async def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 @app.post("/toggle")
-async def toggle(req: ToggleRequest):
+async def toggle(req: ToggleRequest, _auth=Depends(require_admin_auth)):
     global TRADING_ENABLED, MAX_OPEN_TRADES
     if req.trading_enabled is not None:
         TRADING_ENABLED = req.trading_enabled
@@ -1147,7 +1058,7 @@ async def toggle(req: ToggleRequest):
     return {"trading_enabled": TRADING_ENABLED, "max_open_trades": MAX_OPEN_TRADES}
 
 @app.get("/status")
-async def status():
+async def status(_auth=Depends(require_admin_auth)):
     async with db.execute("SELECT id,symbol,root_tf,flip_time,status FROM root_signals") as cur:
         roots = await cur.fetchall()
     async with db.execute("SELECT id,symbol,side,qty,entry_price,sl_price,created_at,open FROM trades") as cur:
@@ -1167,27 +1078,20 @@ async def status():
         "private_ws_connected": bool(private_ws and private_ws.conn and private_ws.authenticated),
     }
 
-# -------------------------
-# Startup / wiring
-# -------------------------
+# ---------- Startup ----------
 @app.on_event("startup")
 async def startup():
     global public_ws, private_ws
     await init_db()
-    public_ws = PublicWebsocketManager(BYBIT_WS_PUBLIC)
-    private_ws = PrivateWebsocketManager(BYBIT_WS_PRIVATE, BYBIT_API_KEY, BYBIT_API_SECRET)
-    # start public detection & connect
+    public_ws = PublicWebsocketManager(PUBLIC_WS_URL)
+    private_ws = PrivateWebsocketManager(PRIVATE_WS_URL, BYBIT_API_KEY, BYBIT_API_SECRET)
     asyncio.create_task(public_ws.connect_and_detect(timeout=8.0))
-    # start private connect & auth
     asyncio.create_task(private_ws.connect_and_auth())
-    # start loops
     asyncio.create_task(root_scanner_loop("1h"))
     asyncio.create_task(root_scanner_loop("4h"))
     asyncio.create_task(active_signal_watcher_loop())
     log("Background tasks started")
 
-# -------------------------
-# Run guard note
-# -------------------------
-# Run with: uvicorn main:app --host 0.0.0.0 --port 8000
-# Use Render environment variables for secrets and settings.
+# ---------- Run note ----------
+# Start with:
+# uvicorn main:app --host 0.0.0.0 --port 8000
