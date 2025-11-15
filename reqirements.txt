@@ -1,0 +1,8 @@
+requirements.txt
+httpx>=0.24
+fastapi>=0.70
+uvicorn[standard]>=0.15
+python-dotenv>=1.0
+aiosqlite>=0.20
+websockets>=11.0
+pydantic>=1.10
