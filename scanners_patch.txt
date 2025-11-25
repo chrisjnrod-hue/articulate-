@@ -1,2 +1,0 @@
-# PATCH for scanners.py
-# No scanner changes required for alignment fix. Only reconnect logic already applied.
