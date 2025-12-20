@@ -39,6 +39,7 @@ PUBLIC_REQ_RETRIES = int(os.getenv("PUBLIC_REQ_RETRIES", "3"))
 
 DISCOVERY_CONCURRENCY = int(os.getenv("DISCOVERY_CONCURRENCY", "24"))
 ROOT_DEDUP_SECONDS = int(os.getenv("ROOT_DEDUP_SECONDS", "300"))
+ROOT_SIGNALS_LOG_INTERVAL = int(os.getenv("ROOT_SIGNALS_LOG_INTERVAL", "30"))
 FLIP_STABILITY_SECONDS = int(os.getenv("FLIP_STABILITY_SECONDS", "0"))
 
 TELEGRAM_WORKER_CONCURRENCY = 1
@@ -51,7 +52,7 @@ MAINNET_API_HOST = "https://api.bybit.com"
 TESTNET_API_HOST = "https://api-testnet.bybit.com"
 PRIMARY_API_HOST = MAINNET_API_HOST if BYBIT_USE_MAINNET else TESTNET_API_HOST
 API_HOSTS = [PRIMARY_API_HOST]
-if PRIMARY_API_HOST == MAINNET_API_HOST:
+if PRIMARY_API_HOST == MAINNET_API_HOST: 
     API_HOSTS.append(TESTNET_API_HOST)
 else:
     API_HOSTS. append(MAINNET_API_HOST)
@@ -103,7 +104,7 @@ candles_cache_ts: Dict[str, Dict[str, int]] = defaultdict(lambda: {})
 active_root_signals: Dict[str, Dict[str, Any]] = {}
 active_signal_index: Dict[str, set] = defaultdict(set)
 recent_root_signals: Dict[str, int] = {}
-last_root_processed:  Dict[str, int] = {}
+last_root_processed: Dict[str, int] = {}
 
 public_ws = None
 private_ws = None
@@ -111,32 +112,130 @@ private_ws = None
 PUBLIC_REQUEST_SEMAPHORE = asyncio.Semaphore(PUBLIC_REQ_CONCURRENCY)
 
 TELEGRAM_QUEUE:  "asyncio.Queue[Tuple[str,int]]" = asyncio.Queue()
-_TELEGRAM_WORKER_TASK: Optional[asyncio.Task] = None
+_TELEGRAM_WORKER_TASK:  Optional[asyncio.Task] = None
 
 symbol_locks: Dict[str, asyncio. Lock] = {}
 observed_flip_registry: Dict[Tuple[str, str, int], Dict[str, int]] = {}
 
 # ---------- Utilities ----------
 def log(*args, **kwargs):
+    """Log with ISO timestamp."""
     if LOG_LEVEL != "none":
         ts = datetime.now(timezone.utc).isoformat()
         print(ts, *args, **kwargs)
 
+
 def now_ts_ms() -> int:
+    """Get current timestamp in milliseconds."""
     return int(time.time() * 1000)
 
+
 def get_symbol_lock(symbol: str) -> asyncio.Lock:
+    """Get or create an asyncio lock for a symbol."""
     lock = symbol_locks.get(symbol)
     if lock is None:
         lock = asyncio.Lock()
         symbol_locks[symbol] = lock
     return lock
 
+
+# ---------- Cache helpers ----------
+def cache_get(symbol: str, token: str) -> Optional[deque]:
+    """Get cached candles deque for symbol/token."""
+    return candles_cache.get(symbol, {}).get(token)
+
+
+def cache_needs_refresh(symbol: str, token: str) -> bool:
+    """Check if cache needs refresh based on TTL."""
+    ts = candles_cache_ts. get(symbol, {}).get(token, 0)
+    return (time.time() - ts) > CANDLE_CACHE_TTL
+
+
+def candles_to_closes(dq: deque) -> List[float]:
+    """Extract closing prices from deque of candles."""
+    return [float(c. get("close", 0)) for c in dq]
+
+
+def last_candle_is_closed(dq: deque, token: str, safety_seconds: int = 0) -> bool:
+    """Check if the last candle in deque is closed."""
+    if not dq:
+        return False
+    last = list(dq)[-1]
+    start = last.get("start", 0)
+    interval_sec = interval_seconds_from_token(token)
+    candle_end = start + interval_sec
+    current_time = int(time.time())
+    return current_time >= (candle_end + safety_seconds)
+
+
+def interval_seconds_from_token(token: str) -> int:
+    """Convert token (5, 15, 60, 240, D) to seconds."""
+    if token == "D":
+        return 86400
+    try:
+        return int(token) * 60
+    except: 
+        return 0
+
+
+def macd_positive_from_closes(closes: List[float]) -> bool:
+    """Check if MACD histogram is positive (last value > 0)."""
+    if len(closes) < MACD_SLOW + MACD_SIGNAL: 
+        return False
+    hist = macd_hist(closes)
+    if not hist or len(hist) == 0:
+        return False
+    last_hist = hist[-1]
+    return last_hist is not None and last_hist > 0
+
+
+# ---------- Signal index helpers ----------
+def signal_exists_for(symbol: str, signal_type: str) -> bool:
+    """Check if active signal exists for symbol/type."""
+    return signal_type in active_signal_index.get(symbol, set())
+
+
+def register_signal_index(symbol: str, signal_type: str):
+    """Register signal in index."""
+    if symbol not in active_signal_index:
+        active_signal_index[symbol] = set()
+    active_signal_index[symbol].add(signal_type)
+
+
+def unregister_signal_index(symbol: str, signal_type: str):
+    """Remove signal from index."""
+    if symbol in active_signal_index: 
+        active_signal_index[symbol].discard(signal_type)
+        if not active_signal_index[symbol]:
+            del active_signal_index[symbol]
+
+
+# ---------- Stablecoin helper ----------
+def is_stablecoin_symbol(symbol: str) -> bool:
+    """Check if symbol is a stablecoin pair."""
+    for stab in STABLECOINS: 
+        if symbol.startswith(stab) or symbol.endswith(stab):
+            return True
+    return False
+
+
+# ---------- Timeframe helpers ----------
+def tf_list_for_root(root_tf: str) -> List[str]:
+    """Get required timeframes for a root timeframe."""
+    if root_tf == "1h": 
+        return ["5m", "15m", "1h"]
+    elif root_tf == "4h":
+        return ["5m", "15m", "1h", "4h"]
+    else:
+        return ["5m", "15m"]
+
+
 # ---------- Telegram worker & queue ----------
 async def _telegram_worker():
+    """Background worker for Telegram message queue."""
     while True:
         try:
-            item = await TELEGRAM_QUEUE.get()
+            item = await TELEGRAM_QUEUE. get()
             if item is None:
                 TELEGRAM_QUEUE.task_done()
                 continue
@@ -151,7 +250,7 @@ async def _telegram_worker():
                     try:
                         data = r.json()
                     except Exception:
-                        data = {"raw_text": (r.text[: 400] + "... ") if r.text else ""}
+                        data = {"raw_text": (r.text[: 400] + "...") if r.text else ""}
                     log("Telegram sent ok (worker) response:", data)
                 elif r.status_code == 429:
                     retry_after = 5
@@ -165,7 +264,7 @@ async def _telegram_worker():
                             pass
                     log("Telegram send failed:  429 rate limit, retry after", retry_after)
                     await asyncio.sleep(retry_after)
-                    if attempt + 1 < TELEGRAM_RETRY_LIMIT:
+                    if attempt + 1 < TELEGRAM_RETRY_LIMIT: 
                         await TELEGRAM_QUEUE.put((text, attempt + 1))
                     else:
                         log("Telegram send retry limit reached, dropping message")
@@ -191,7 +290,9 @@ async def _telegram_worker():
             log("Unexpected telegram worker loop error:", e)
             await asyncio.sleep(1)
 
+
 async def send_telegram(text: str):
+    """Enqueue a Telegram message."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log("Telegram not configured; skipping message:", text)
         return
@@ -206,14 +307,16 @@ async def send_telegram(text: str):
     except Exception as e:
         log("Failed to enqueue telegram message:", e)
 
+
 async def send_root_signals_telegram():
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    """Send summary of active root signals via Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: 
         log("Telegram not configured; skipping root signals telegram")
         return
-    if not active_root_signals:
-        await send_telegram("Root signals:  0")
+    if not active_root_signals: 
+        await send_telegram("Root signals: 0")
         return
-    lines = ["Root signals summary: "]
+    lines = ["Root signals summary:  "]
     for sig in active_root_signals. values():
         sym = sig.get("symbol")
         tf = sig.get("root_tf")
@@ -221,8 +324,10 @@ async def send_root_signals_telegram():
         lines.append(f"{sym} {tf} {status}")
     await send_telegram("\n".join(lines))
 
+
 # ---------- Admin auth dependency ----------
 async def require_admin_auth(authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)):
+    """Validate admin API key from header."""
     if not ADMIN_API_KEY: 
         log("WARNING: ADMIN_API_KEY not set — admin endpoints are UNPROTECTED.")
         return
@@ -234,13 +339,15 @@ async def require_admin_auth(authorization: Optional[str] = Header(None), x_api_
         else:
             token = auth
     if x_api_key:
-        token = x_api_key. strip()
+        token = x_api_key.strip()
     if not token or token != ADMIN_API_KEY: 
         log("Admin auth failed")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
+
 # ---------- EMA / MACD ----------
 def ema(values: List[float], period: int) -> List[float]:
+    """Calculate Exponential Moving Average."""
     if not values or period <= 0:
         return []
     k = 2 / (period + 1)
@@ -252,19 +359,29 @@ def ema(values: List[float], period: int) -> List[float]:
         emas.append(ema_prev)
     return emas
 
+
 def macd_hist(prices: List[float], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL) -> List[Optional[float]]:
-    if len(prices) < slow + signal: 
-        return []
+    """Calculate MACD histogram with proper handling of None padding."""
+    if len(prices) < slow + signal:
+        return [None] * len(prices)
+
     ema_fast = ema(prices, fast)
     ema_slow = ema(prices, slow)
     macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
     signal_line = ema(macd_line, signal)
-    hist = [m - s for m, s in zip(macd_line[len(macd_line) - len(signal_line):], signal_line)]
-    padding = len(prices) - len(hist)
-    return [None] * padding + hist
+
+    # Align histogram length with prices
+    hist = [None] * len(prices)
+    start_idx = len(prices) - len(signal_line)
+    for i, (m, s) in enumerate(zip(macd_line[start_idx:], signal_line)):
+        hist[start_idx + i] = m - s
+
+    return hist
+
 
 # ---------- Resilient public GET ----------
 async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = None, timeout: int = 12) -> Optional[Dict[str, Any]]: 
+    """Resilient public API request with retries and fallback hosts."""
     last_exc = None
     for attempt in range(PUBLIC_REQ_RETRIES):
         for host in API_HOSTS:
@@ -285,7 +402,7 @@ async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = No
                         except Exception:
                             try:
                                 body = r.json()
-                                retry_after = int(body. get("parameters", {}).get("retry_after", retry_after))
+                                retry_after = int(body.get("parameters", {}).get("retry_after", retry_after))
                             except Exception:
                                 pass
                         log("Received 429 from", url, "retry_after", retry_after)
@@ -294,7 +411,7 @@ async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = No
                     if r.status_code == 200:
                         try:
                             return r.json()
-                        except Exception: 
+                        except Exception:
                             log("Invalid JSON from", url, "body excerpt:", (r.text[:400] + "...") if r.text else "")
                             continue
                     else:
@@ -311,12 +428,16 @@ async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = No
         log("resilient_public_get exhausted retries; last exception:", last_exc)
     return None
 
+
 # ---------- Signed request ----------
 def bybit_sign_v5(api_secret: str, timestamp: str, method: str, path: str, body: str) -> str:
+    """Generate Bybit V5 API signature."""
     prehash = timestamp + method. upper() + path + (body or "")
     return hmac.new(api_secret.encode(), prehash.encode(), hashlib.sha256).hexdigest()
 
+
 async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, Any] = None):
+    """Make authenticated request to Bybit API."""
     ts = str(int(time.time() * 1000))
     body = json.dumps(payload) if payload else ""
     signature = bybit_sign_v5(BYBIT_API_SECRET or "", ts, method. upper(), endpoint, body)
@@ -329,19 +450,19 @@ async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, An
     url = PRIMARY_API_HOST + endpoint
     for attempt in range(3):
         try:
-            if method. upper() == "GET":
+            if method.upper() == "GET":
                 r = await httpx_client.get(url, params=payload or {}, headers=headers, timeout=20)
             else:
                 r = await httpx_client.post(url, content=body or "{}", headers=headers, timeout=20)
             if r.status_code == 429:
                 retry_after = 5
                 try:
-                    retry_after = int(r. headers.get("Retry-After", retry_after))
+                    retry_after = int(r.headers.get("Retry-After", retry_after))
                 except Exception:
-                    try: 
+                    try:
                         body_json = r.json()
-                        retry_after = int(body_json. get("parameters", {}).get("retry_after", retry_after))
-                    except Exception:
+                        retry_after = int(body_json.get("parameters", {}).get("retry_after", retry_after))
+                    except Exception: 
                         pass
                 log("Bybit signed request 429, retry_after", retry_after)
                 await asyncio.sleep(retry_after)
@@ -357,172 +478,71 @@ async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, An
             continue
     return {}
 
-# ---------- SQLite init & persistence ----------
-async def init_db():
-    global db
-    db = await aiosqlite.connect(DB_PATH)
-    await db.execute("""CREATE TABLE IF NOT EXISTS root_signals (id TEXT PRIMARY KEY, symbol TEXT, root_tf TEXT, flip_time INTEGER, flip_price REAL, status TEXT, priority TEXT, signal_type TEXT, components TEXT, created_at INTEGER)""")
-    await db.execute("""CREATE TABLE IF NOT EXISTS trades (id TEXT PRIMARY KEY, symbol TEXT, side TEXT, qty REAL, entry_price REAL, sl_price REAL, created_at INTEGER, open BOOLEAN, raw_response TEXT)""")
-    await db.execute("""CREATE TABLE IF NOT EXISTS raw_ws_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, topic TEXT, message TEXT, created_at INTEGER)""")
-    await db.execute("""CREATE TABLE IF NOT EXISTS public_subscriptions (topic TEXT PRIMARY KEY, created_at INTEGER)""")
-    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_root_signals_symbol_tf_flip ON root_signals(symbol, root_tf, flip_time)""")
-    await db.commit()
-    log("DB initialized at", DB_PATH)
 
-async def persist_root_signal(sig: Dict[str, Any]):
-    comps = json.dumps(sig.get("components") or [])
+# ---------- Kline fetching and caching ----------
+async def fetch_klines(symbol: str, token: str, limit: int = 200) -> Optional[List[Dict[str, Any]]]:
+    """Fetch klines from Bybit API."""
+    params = {"symbol": symbol, "interval": token, "limit": limit}
+    result = await resilient_public_get(KLINE_ENDPOINTS, params=params, timeout=12)
+    if not result:
+        return None
     try:
-        await db.execute("INSERT OR IGNORE INTO root_signals (id,symbol,root_tf,flip_time,flip_price,status,priority,signal_type,components,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (sig["id"], sig["symbol"], sig. get("root_tf"), sig.get("root_flip_time") or sig.get("flip_time"), sig.get("root_flip_price") or sig.get("flip_price"), sig.get("status", "watching"), sig.get("priority"), sig.get("signal_type", "root"), comps, sig.get("created_at")))
-        await db.commit()
+        data = result. get("result", {}) if isinstance(result. get("result"), dict) else result.get("result", [])
+        if isinstance(data, dict):
+            data = data.get("list", [])
+
+        klines = []
+        for item in data:
+            if not item or len(item) < 5:
+                continue
+            try:
+                start = int(float(item[0]))
+                close = float(item[4])
+                klines.append({"start": start, "close": close})
+            except Exception:
+                continue
+        return klines if klines else None
     except Exception as e:
-        log("persist_root_signal DB error:", e)
+        log("parse klines error:", e)
+        return None
 
-async def remove_root_signal(sig_id: str):
-    await db.execute("DELETE FROM root_signals WHERE id = ?", (sig_id,))
-    await db.commit()
 
-# ---------- Add / remove signals with improved notification and dedupe ----------
-async def add_signal(sig: Dict[str, Any]) -> bool:
-    sid = sig["id"]
-    stype = sig. get("signal_type", "root")
-    sym = sig["symbol"]
-    root_time = sig.get("root_flip_time") or sig.get("flip_time")
-    lock = get_symbol_lock(sym)
-    async with lock:
-        if signal_exists_for(sym, stype):
-            log("Duplicate signal suppressed (inside lock, by active_signal_index):", sym, stype)
-            return False
-        if stype == "root" and root_time is not None:
-            existing_recent = recent_root_signals. get(sym)
-            if existing_recent == root_time:
-                log("Duplicate root signal suppressed by recent_root_signals:", sym, root_time)
-                return False
-            for existing in active_root_signals.values():
-                if existing. get("symbol") == sym and existing.get("signal_type", "root") == stype:
-                    if existing.get("root_flip_time") == root_time:
-                        log("Duplicate existing signal found (inside lock):", sym, stype, root_time)
-                        return False
-            try:
-                root_tf = sig.get("root_tf")
-                token = TF_MAP.get(root_tf)
-                if token:
-                    await ensure_cached_candles(sym, root_tf, MIN_CANDLES_REQUIRED)
-                    dq = cache_get(sym, token)
-                    if not dq or len(dq) == 0:
-                        log("add_signal: cannot validate root signal, missing cache for", sym, root_tf)
-                        return False
-                    last_start = list(dq)[-1]["start"]
-                    if last_candle_is_closed(dq, token, safety_seconds=3):
-                        log("add_signal: last candle is closed for", sym, root_tf, "rejecting root signal with flip_time", root_time)
-                        return False
-                    if last_start != root_time:
-                        log("add_signal: root_flip_time does not match current open candle for", sym, root_tf, "expected", last_start, "got", root_time)
-                        return False
-            except Exception as e:
-                log("add_signal validation error:", e)
-                return False
-        if sid in active_root_signals: 
-            log("Signal id already present, skipping:", sid)
-            return False
-        active_root_signals[sid] = sig
-        register_signal_index(sym, stype)
-        if stype == "root":
-            recent_root_signals[sym] = int(time.time())
-        try:
-            await persist_root_signal(sig)
-        except Exception as e:
-            log("persist_root_signal error:", e)
-        log("Added signal:", sid, stype, sym)
-        try:
-            await send_telegram(f"Added signal: {sid} {stype} {sym}")
-        except Exception: 
-            pass
+def merge_into_cache(symbol: str, token: str, candles: List[Dict[str, Any]]):
+    """Merge fetched candles into cache."""
+    if symbol not in candles_cache:
+        candles_cache[symbol] = {}
+    if token not in candles_cache[symbol]:
+        candles_cache[symbol][token] = deque(maxlen=CANDLE_CACHE_MAX)
 
-    try:
-        async def _post_add_flow():
-            if stype == "root":
-                try:
-                    global public_ws
-                    if public_ws:
-                        try:
-                            await public_ws.subscribe_kline(sym, TF_MAP["5m"])
-                        except Exception as e:
-                            log("Error subscribing 5m for", sym, e)
-                        try:
-                            await public_ws.subscribe_kline(sym, TF_MAP["15m"])
-                        except Exception as e:
-                            log("Error subscribing 15m for", sym, e)
-                    try:
-                        await asyncio.gather(
-                            ensure_cached_candles(sym, "5m", MIN_CANDLES_REQUIRED),
-                            ensure_cached_candles(sym, "15m", MIN_CANDLES_REQUIRED),
-                        )
-                    except Exception as e:
-                        log("Prewarm small TFs error for", sym, e)
-                except Exception as e:
-                    log("post_add subscribe/prewarm error:", e)
-            try:
-                await notify_alignment_if_ready(sig)
-            except Exception as e: 
-                log("notify_alignment_if_ready post-add error:", e)
+    dq = candles_cache[symbol][token]
+    for c in candles:
+        if not any(x["start"] == c["start"] for x in dq):
+            dq.append(c)
 
-        asyncio.create_task(_post_add_flow())
-    except Exception: 
-        pass
-    return True
+    if symbol not in candles_cache_ts:
+        candles_cache_ts[symbol] = {}
+    candles_cache_ts[symbol][token] = time.time()
 
-async def remove_signal(sig_id: str):
-    sig = active_root_signals.pop(sig_id, None)
-    if not sig:
-        return
-    stype = sig.get("signal_type", "root")
-    sym = sig. get("symbol")
-    if stype == "root":
-        try:
-            recent_root_signals. pop(sym, None)
-        except Exception:
-            pass
-    unregister_signal_index(sym, stype)
-    try:
-        await remove_root_signal(sig_id)
-    except Exception:
-        pass
 
-    if stype == "root":
-        try:
-            other_root_exists = any(x.get("symbol") == sym and x.get("signal_type") == "root" for x in active_root_signals.values())
-            global public_ws
-            if public_ws and not other_root_exists:
-                try:
-                    await public_ws.unsubscribe_kline(sym, TF_MAP["5m"])
-                except Exception as e:
-                    log("Error unsubscribing 5m for", sym, e)
-                try:
-                    await public_ws.unsubscribe_kline(sym, TF_MAP["15m"])
-                except Exception as e:
-                    log("Error unsubscribing 15m for", sym, e)
-        except Exception: 
-            pass
-
-    log("Removed signal:", sig_id)
-
-# ---------- ensure_cached_candles ----------
-async def ensure_cached_candles(symbol:  str, tf: str, required: int):
+# ---------- Ensure candles cached ----------
+async def ensure_cached_candles(symbol: str, tf: str, required:  int):
+    """Ensure we have enough cached candles."""
     token = TF_MAP[tf]
     dq = cache_get(symbol, token)
     if dq and len(dq) >= required and not cache_needs_refresh(symbol, token):
         return
     try:
         fetched = await fetch_klines(symbol, token, limit=max(required * 2, required + 50))
-        if fetched:
+        if fetched: 
             merge_into_cache(symbol, token, fetched)
             log(f"Updated cache for {symbol} {tf}:  now {len(cache_get(symbol, token) or [])} candles")
     except Exception as e:
         log("ensure_cached_candles fetch error:", e)
 
-# ---------- Detect flip:  OPEN ONLY ----------
+
+# ---------- Detect flip ----------
 async def detect_flip(symbol: str, tf: str) -> Tuple[Optional[str], Optional[int]]:
+    """Detect MACD flip (open only, mid-candle allowed)."""
     token = TF_MAP. get(tf) if tf in TF_MAP else tf
     if token is None:
         token = TF_MAP.get(tf, tf)
@@ -531,12 +551,13 @@ async def detect_flip(symbol: str, tf: str) -> Tuple[Optional[str], Optional[int
     if not dq or len(dq) < MIN_CANDLES_REQUIRED: 
         return None, None
     closes = candles_to_closes(dq)
-    if len(closes) < MACD_SLOW + MACD_SIGNAL: 
+    if len(closes) < MACD_SLOW + MACD_SIGNAL:
         return None, None
     hist = macd_hist(closes)
     if not hist or len(hist) < 2:
         return None, None
     last_start = list(dq)[-1]["start"]
+    # Allow mid-candle detection - don't skip if last candle is open
     if last_candle_is_closed(dq, token, safety_seconds=3):
         observed_flip_registry.pop((symbol, token, last_start), None)
         return None, None
@@ -555,13 +576,15 @@ async def detect_flip(symbol: str, tf: str) -> Tuple[Optional[str], Optional[int
         return "open", last_start
     return None, None
 
+
 def flip_is_stable_enough(symbol: str, tf: str, start:  int) -> bool:
+    """Check if flip is stable enough based on FLIP_STABILITY_SECONDS."""
     if FLIP_STABILITY_SECONDS <= 0:
         return True
-    token = TF_MAP.get(tf) if tf in TF_MAP else tf
+    token = TF_MAP. get(tf) if tf in TF_MAP else tf
     if token is None and tf in REVERSE_TF_MAP:
         token = tf
-    if token is None: 
+    if token is None:
         token = TF_MAP.get(tf, tf)
     key = (symbol, token, start)
     rec = observed_flip_registry.get(key)
@@ -569,8 +592,10 @@ def flip_is_stable_enough(symbol: str, tf: str, start:  int) -> bool:
         return False
     return (int(time.time()) - int(rec["first_seen"])) >= FLIP_STABILITY_SECONDS
 
+
 # ---------- Raw WS persistence ----------
 async def persist_raw_ws(source: str, topic: str, message: str):
+    """Persist raw WebSocket message to database."""
     try:
         if not db: 
             return
@@ -579,12 +604,13 @@ async def persist_raw_ws(source: str, topic: str, message: str):
     except Exception: 
         pass
 
+
 # ---------- Load persisted signals ----------
 async def load_persisted_root_signals():
+    """Load persisted root signals from database."""
     try:
         async with db.execute("SELECT id,symbol,root_tf,flip_time,flip_price,status,priority,signal_type,components,created_at FROM root_signals") as cur:
             rows = await cur.fetchall()
-        max_flip_per_symbol:  Dict[str,int] = {}
         loaded = 0
         for r in rows:
             try:
@@ -607,7 +633,7 @@ async def load_persisted_root_signals():
                 try:
                     if signal_type == "root" and root_tf and flip_time: 
                         token = TF_MAP.get(root_tf)
-                        if token:
+                        if token: 
                             expiry = flip_time + interval_seconds_from_token(token)
                             if int(time.time()) >= expiry:
                                 expired = True
@@ -632,7 +658,7 @@ async def load_persisted_root_signals():
                     "priority": priority,
                     "signal_type": signal_type,
                     "components": comps,
-                    "created_at":  created_at,
+                    "created_at": created_at,
                 }
                 register_signal_index(symbol, signal_type)
                 if symbol and flip_time:
@@ -640,24 +666,20 @@ async def load_persisted_root_signals():
                 loaded += 1
             except Exception: 
                 continue
-        log("Loaded", loaded, "persisted root signals from DB and seeded recent_root_signals with wall-clock cooldowns")
-    except Exception as e: 
+        log("Loaded", loaded, "persisted root signals from DB")
+    except Exception as e:
         log("load_persisted_root_signals error:", e)
 
-# ---------- Notify persisted roots after startup ----------
-async def _notify_loaded_roots_after_startup():
-    """
-    After startup has loaded persisted root signals and WS/connect tasks have been started,
-    ensure subscriptions & caches for each persisted root and run the alignment notifier. 
 
-    This will make persisted roots (loaded from DB) also trigger MTF alignment notifications.
-    """
+async def _notify_loaded_roots_after_startup():
+    """After startup, notify and setup subscriptions for persisted roots."""
     try:
         if not active_root_signals:
             return
         sem = asyncio.Semaphore(min(10, DISCOVERY_CONCURRENCY or 10))
+
         async def _worker(sig):
-            sym = sig.get("symbol")
+            sym = sig. get("symbol")
             root_tf = sig.get("root_tf")
             try:
                 wait_attempts = 0
@@ -693,17 +715,248 @@ async def _notify_loaded_roots_after_startup():
         for sig in list(active_root_signals.values()):
             if sig.get("signal_type") != "root":
                 continue
+
             async def _wrap(s=sig):
                 async with sem:
                     await _worker(s)
+
             tasks.append(asyncio.create_task(_wrap()))
         if tasks:
             await asyncio. gather(*tasks, return_exceptions=True)
     except Exception as e:
         log("notify_loaded_roots_after_startup error:", e)
 
+
+# ---------- Notify alignment ----------
+async def notify_alignment_if_ready(sig: Dict[str, Any]):
+    """Notify if signal reaches alignment conditions."""
+    # Placeholder for alignment notification logic
+    pass
+
+
+# ---------- Add / remove signals ----------
+async def add_signal(sig: Dict[str, Any]) -> bool:
+    """Add signal with validation and deduplication."""
+    sid = sig["id"]
+    stype = sig. get("signal_type", "root")
+    sym = sig["symbol"]
+    root_time = sig.get("root_flip_time") or sig.get("flip_time")
+    lock = get_symbol_lock(sym)
+    async with lock:
+        if signal_exists_for(sym, stype):
+            log("Duplicate signal suppressed (inside lock, by active_signal_index):", sym, stype)
+            return False
+        if stype == "root" and root_time is not None:
+            existing_recent = recent_root_signals.get(sym)
+            if existing_recent == root_time:
+                log("Duplicate root signal suppressed by recent_root_signals:", sym, root_time)
+                return False
+            for existing in active_root_signals.values():
+                if existing. get("symbol") == sym and existing.get("signal_type", "root") == stype:
+                    if existing.get("root_flip_time") == root_time:
+                        log("Duplicate existing signal found (inside lock):", sym, stype, root_time)
+                        return False
+            try:
+                root_tf = sig.get("root_tf")
+                token = TF_MAP.get(root_tf)
+                if token:
+                    await ensure_cached_candles(sym, root_tf, MIN_CANDLES_REQUIRED)
+                    dq = cache_get(sym, token)
+                    if not dq or len(dq) == 0:
+                        log("add_signal: cannot validate root signal, missing cache for", sym, root_tf)
+                        return False
+                    last_start = list(dq)[-1]["start"]
+                    # FIXED: Allow mid-candle detection
+                    if last_candle_is_closed(dq, token, safety_seconds=3):
+                        log("add_signal: last candle is closed for", sym, root_tf, "rejecting root signal with flip_time", root_time)
+                        return False
+                    if last_start != root_time:
+                        log("add_signal: root_flip_time does not match current open candle for", sym, root_tf, "expected", last_start, "got", root_time)
+                        return False
+            except Exception as e:
+                log("add_signal validation error:", e)
+                return False
+        if sid in active_root_signals:
+            log("Signal id already present, skipping:", sid)
+            return False
+        active_root_signals[sid] = sig
+        register_signal_index(sym, stype)
+        if stype == "root":
+            recent_root_signals[sym] = int(time.time())
+        try:
+            await persist_root_signal(sig)
+        except Exception as e: 
+            log("persist_root_signal error:", e)
+        log("Added signal:", sid, stype, sym)
+        try:
+            await send_telegram(f"Added signal: {sid} {stype} {sym}")
+        except Exception: 
+            pass
+
+    try:
+        async def _post_add_flow():
+            if stype == "root":
+                try:
+                    global public_ws
+                    if public_ws:
+                        try:
+                            await public_ws.subscribe_kline(sym, TF_MAP["5m"])
+                        except Exception as e:
+                            log("Error subscribing 5m for", sym, e)
+                        try:
+                            await public_ws.subscribe_kline(sym, TF_MAP["15m"])
+                        except Exception as e:
+                            log("Error subscribing 15m for", sym, e)
+                    try:
+                        await asyncio.gather(
+                            ensure_cached_candles(sym, "5m", MIN_CANDLES_REQUIRED),
+                            ensure_cached_candles(sym, "15m", MIN_CANDLES_REQUIRED),
+                        )
+                    except Exception as e:
+                        log("Prewarm small TFs error for", sym, e)
+                except Exception as e:
+                    log("post_add subscribe/prewarm error:", e)
+            try:
+                await notify_alignment_if_ready(sig)
+            except Exception as e:
+                log("notify_alignment_if_ready post-add error:", e)
+
+        asyncio.create_task(_post_add_flow())
+    except Exception: 
+        pass
+    return True
+
+
+async def remove_signal(sig_id: str):
+    """Remove signal from active tracking."""
+    sig = active_root_signals.pop(sig_id, None)
+    if not sig:
+        return
+    stype = sig.get("signal_type", "root")
+    sym = sig. get("symbol")
+    if stype == "root": 
+        try:
+            recent_root_signals. pop(sym, None)
+        except Exception:
+            pass
+    unregister_signal_index(sym, stype)
+    try:
+        await remove_root_signal(sig_id)
+    except Exception: 
+        pass
+
+    if stype == "root":
+        try:
+            other_root_exists = any(x. get("symbol") == sym and x.get("signal_type") == "root" for x in active_root_signals.values())
+            global public_ws
+            if public_ws and not other_root_exists:
+                try:
+                    await public_ws.unsubscribe_kline(sym, TF_MAP["5m"])
+                except Exception as e:
+                    log("Error unsubscribing 5m for", sym, e)
+                try:
+                    await public_ws.unsubscribe_kline(sym, TF_MAP["15m"])
+                except Exception as e:
+                    log("Error unsubscribing 15m for", sym, e)
+        except Exception:
+            pass
+
+    log("Removed signal:", sig_id)
+
+
+# ---------- SQLite init & persistence ----------
+async def init_db():
+    """Initialize SQLite database."""
+    global db
+    db = await aiosqlite.connect(DB_PATH)
+    await db.execute("""CREATE TABLE IF NOT EXISTS root_signals (id TEXT PRIMARY KEY, symbol TEXT, root_tf TEXT, flip_time INTEGER, flip_price REAL, status TEXT, priority TEXT, signal_type TEXT, components TEXT, created_at INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS trades (id TEXT PRIMARY KEY, symbol TEXT, side TEXT, qty REAL, entry_price REAL, sl_price REAL, created_at INTEGER, open BOOLEAN, raw_response TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS raw_ws_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, topic TEXT, message TEXT, created_at INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS public_subscriptions (topic TEXT PRIMARY KEY, created_at INTEGER)""")
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_root_signals_symbol_tf_flip ON root_signals(symbol, root_tf, flip_time)""")
+    await db.commit()
+    log("DB initialized at", DB_PATH)
+
+
+async def persist_root_signal(sig:  Dict[str, Any]):
+    """Persist root signal to database."""
+    comps = json.dumps(sig.get("components") or [])
+    try:
+        await db.execute("INSERT OR IGNORE INTO root_signals (id,symbol,root_tf,flip_time,flip_price,status,priority,signal_type,components,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (sig["id"], sig["symbol"], sig. get("root_tf"), sig.get("root_flip_time") or sig. get("flip_time"), sig.get("root_flip_price") or sig.get("flip_price"), sig.get("status", "watching"), sig.get("priority"), sig.get("signal_type", "root"), comps, sig.get("created_at")))
+        await db.commit()
+    except Exception as e:
+        log("persist_root_signal DB error:", e)
+
+
+async def persist_trade(trade: Dict[str, Any]):
+    """Persist trade to database."""
+    try:
+        await db.execute("INSERT OR REPLACE INTO trades (id,symbol,side,qty,entry_price,sl_price,created_at,open,raw_response) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (trade["id"], trade["symbol"], trade["side"], trade["qty"], trade.get("entry_price"), trade.get("sl_price"), trade["created_at"], trade.get("open", True), json.dumps(trade.get("raw", {}))))
+        await db.commit()
+    except Exception as e: 
+        log("persist_trade DB error:", e)
+
+
+async def remove_root_signal(sig_id: str):
+    """Remove root signal from database."""
+    try:
+        await db.execute("DELETE FROM root_signals WHERE id = ? ", (sig_id,))
+        await db.commit()
+    except Exception as e:
+        log("remove_root_signal DB error:", e)
+
+
+# ---------- Tradable symbols ----------
+async def get_tradable_usdt_symbols() -> List[str]:
+    """Get list of tradable USDT symbols."""
+    global symbols_info_cache
+
+    # Use cache if available
+    if symbols_info_cache and len(symbols_info_cache) > 100:
+        return [s for s in symbols_info_cache. keys() if s.endswith("USDT")]
+
+    result = await resilient_public_get(INSTRUMENTS_ENDPOINTS, timeout=12)
+    if not result:
+        return []
+
+    try:
+        symbols = []
+        data = result.get("result", {})
+        if isinstance(data, dict):
+            items = data.get("list", [])
+        else:
+            items = data if isinstance(data, list) else []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            symbol = item.get("symbol") or item.get("instId")
+            if symbol and symbol.endswith("USDT") and item.get("status") == "Trading":
+                symbols.append(symbol)
+                symbols_info_cache[symbol] = item
+
+        return symbols
+    except Exception as e:
+        log("get_tradable_usdt_symbols parse error:", e)
+        return []
+
+
+# ---------- Open trades ----------
+async def has_open_trade(symbol: str) -> bool:
+    """Check if symbol has open trade."""
+    try:
+        async with db.execute("SELECT id FROM trades WHERE symbol = ? AND open = ? ", (symbol, True)) as cur:
+            row = await cur.fetchone()
+        return row is not None
+    except Exception: 
+        return False
+
+
 # ---------- Debug helpers ----------
 def log_current_root_signals():
+    """Log current root signals for debugging."""
     try:
         count = len(active_root_signals)
         if count == 0:
@@ -725,11 +978,10 @@ def log_current_root_signals():
     except Exception as e:
         log("log_current_root_signals error:", e)
 
+
 # ---------- Debug endpoints & startup glue ----------
 def init_app(fastapi_app):
-    """
-    Register endpoints and startup event.  Start background tasks by importing scanners lazily.
-    """
+    """Register endpoints and startup event."""
     global app
     app = fastapi_app
 
@@ -739,8 +991,8 @@ def init_app(fastapi_app):
 
     @app.get("/debug/check_symbol")
     async def debug_check_symbol(symbol: str, tf: str = "1h", _auth=Depends(require_admin_auth)):
-        if tf not in TF_MAP: 
-            raise HTTPException(status_code=400, detail=f"Unknown timeframe {tf}.  Valid:  {list(TF_MAP. keys())}")
+        if tf not in TF_MAP:
+            raise HTTPException(status_code=400, detail=f"Unknown timeframe {tf}.  Valid:  {list(TF_MAP.keys())}")
         token = TF_MAP[tf]
         await ensure_cached_candles(symbol, tf, MIN_CANDLES_REQUIRED)
         dq = cache_get(symbol, token)
@@ -760,7 +1012,7 @@ def init_app(fastapi_app):
             "tf": tf,
             "cached_klines": len(dq),
             "macd_hist_len": len(hist),
-            "macd_last":  hist[-1] if hist else None,
+            "macd_last": hist[-1] if hist else None,
             "flip_kind": flip_kind,
             "flip_ts": flip_ts,
             "last_closed": closed,
@@ -783,24 +1035,21 @@ def init_app(fastapi_app):
         public_ws_connected = False
         try:
             public_ws_connected = bool(public_ws and getattr(public_ws, "conn", None))
-        except Exception:
+        except Exception: 
             public_ws_connected = False
         return {"status": "ok", "db":  db_ok, "public_ws_connected": public_ws_connected, "time": datetime.now(timezone.utc).isoformat()}
 
     @app.post("/debug/ws/subscribe_test")
     async def debug_ws_subscribe_test(symbol: str, tf: str = "15m", _auth=Depends(require_admin_auth)):
-        """
-        Example: POST /debug/ws/subscribe_test?symbol=ETHUSDT&tf=15m
-        Will attempt to subscribe the public websocket to the kline topic for the given symbol/tf. 
-        """
+        """Subscribe test endpoint."""
         if tf not in TF_MAP: 
             raise HTTPException(status_code=400, detail=f"Unknown tf {tf}. Valid: {list(TF_MAP.keys())}")
         if not public_ws:
             raise HTTPException(status_code=500, detail="public_ws not initialized")
         token = TF_MAP[tf]
-        topic = f"klineV2.{token}. {symbol}"
-        try: 
-            await public_ws.subscribe_kline(symbol, token)
+        topic = f"klineV2. {token}. {symbol}"
+        try:
+            await public_ws. subscribe_kline(symbol, token)
             try:
                 await ensure_cached_candles(symbol, tf, MIN_CANDLES_REQUIRED)
             except Exception: 
@@ -835,17 +1084,17 @@ def init_app(fastapi_app):
 
         try:
             import scanners as _sc
-            asyncio.create_task(_sc.root_scanner_loop("1h"))
+            asyncio.create_task(_sc. root_scanner_loop("1h"))
             asyncio.create_task(_sc.root_scanner_loop("4h"))
             asyncio.create_task(_sc.evaluate_signals_loop())
-            asyncio.create_task(_sc.expire_signals_loop())
+            asyncio. create_task(_sc.expire_signals_loop())
             asyncio. create_task(_sc.periodic_root_logger())
         except Exception as e:
             log("Error starting scanner background tasks:", e)
 
         try:
             asyncio.create_task(_notify_loaded_roots_after_startup())
-        except Exception as e: 
+        except Exception as e:
             log("Failed to schedule notify_loaded_roots_after_startup:", e)
 
         log("Background tasks started")
