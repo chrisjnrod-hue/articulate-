@@ -1,6 +1,6 @@
 # services.py
-# Core helpers: configuration, DB, MACD, candle cache, resilient requests,
-# persistence, telegram queue, signal add/remove and small endpoints/startup glue.
+# Core helpers:  configuration, DB, MACD, candle cache, resilient requests,
+# persistence, telegram queue, signal add/remove and small endpoints/startup glue. 
 
 import os
 import time
@@ -21,13 +21,12 @@ from fastapi import Depends, Header, HTTPException, status
 # ---------- Configuration / env ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
+BYBIT_API_KEY = os. getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 BYBIT_USE_MAINNET = os.getenv("BYBIT_USE_MAINNET", "false").lower() == "true"
 TRADING_ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "5"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
-ROOT_SCAN_LOOKBACK = int(os.getenv("ROOT_SCAN_LOOKBACK", "3"))
 DB_PATH = os.getenv("DB_PATH", "scanner.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
 
@@ -48,11 +47,6 @@ TELEGRAM_RETRY_LIMIT = 4
 CANDLE_CACHE_MAX = int(os.getenv("CANDLE_CACHE_MAX", "2000"))
 CANDLE_CACHE_TTL = int(os.getenv("CANDLE_CACHE_TTL", "300"))
 
-SKIP_DIGIT_PREFIX = os.getenv("SKIP_DIGIT_PREFIX", "false").lower() == "true"
-SYMBOL_SCAN_LIMIT = int(os.getenv("SYMBOL_SCAN_LIMIT", "0"))
-
-ROOT_SIGNALS_LOG_INTERVAL = int(os.getenv("ROOT_SIGNALS_LOG_INTERVAL", "60"))
-
 MAINNET_API_HOST = "https://api.bybit.com"
 TESTNET_API_HOST = "https://api-testnet.bybit.com"
 PRIMARY_API_HOST = MAINNET_API_HOST if BYBIT_USE_MAINNET else TESTNET_API_HOST
@@ -60,13 +54,13 @@ API_HOSTS = [PRIMARY_API_HOST]
 if PRIMARY_API_HOST == MAINNET_API_HOST:
     API_HOSTS.append(TESTNET_API_HOST)
 else:
-    API_HOSTS.append(MAINNET_API_HOST)
+    API_HOSTS. append(MAINNET_API_HOST)
 
 PUBLIC_WS_URL = "wss://stream.bybit.com/v5/public/linear" if BYBIT_USE_MAINNET else "wss://stream-testnet.bybit.com/v5/public/linear"
 PRIVATE_WS_URL = ("wss://stream.bybit.com/v5/private" if BYBIT_USE_MAINNET else "wss://stream-testnet.bybit.com/v5/private") if TRADING_ENABLED else None
 
 INSTRUMENTS_ENDPOINTS = [
-    "/v5/market/instruments-info?category=linear&instType=PERPETUAL",
+    "/v5/market/instruments-info? category=linear&instType=PERPETUAL",
     "/v5/market/instruments-info?category=linear",
     "/v5/market/instruments-info?category=perpetual",
     "/v5/market/instruments-info",
@@ -93,15 +87,13 @@ MIN_CANDLES_REQUIRED = MACD_SLOW + MACD_SIGNAL + 5
 
 LEVERAGE = int(os.getenv("LEVERAGE", "3"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.015"))
-BREAKEVEN_PCT = float(os.getenv("BREAKEVEN_PCT", "0.005"))
+BREAKEVEN_PCT = float(os. getenv("BREAKEVEN_PCT", "0.005"))
 STABLECOINS = {"USDT", "BUSD", "USDC", "TUSD", "DAI"}
-
-MIN_SYMBOL_AGE_MONTHS = int(os.getenv("MIN_SYMBOL_AGE_MONTHS", "0"))
 
 # ---------- Globals ----------
 app = None
 httpx_client = httpx.AsyncClient(timeout=20)
-db: Optional[aiosqlite.Connection] = None
+db:  Optional[aiosqlite.Connection] = None
 
 symbols_info_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -111,18 +103,17 @@ candles_cache_ts: Dict[str, Dict[str, int]] = defaultdict(lambda: {})
 active_root_signals: Dict[str, Dict[str, Any]] = {}
 active_signal_index: Dict[str, set] = defaultdict(set)
 recent_root_signals: Dict[str, int] = {}
-last_root_processed: Dict[str, int] = {}
+last_root_processed:  Dict[str, int] = {}
 
 public_ws = None
 private_ws = None
 
 PUBLIC_REQUEST_SEMAPHORE = asyncio.Semaphore(PUBLIC_REQ_CONCURRENCY)
 
-TELEGRAM_QUEUE: "asyncio.Queue[Tuple[str,int]]" = asyncio.Queue()
+TELEGRAM_QUEUE:  "asyncio.Queue[Tuple[str,int]]" = asyncio.Queue()
 _TELEGRAM_WORKER_TASK: Optional[asyncio.Task] = None
 
-_re_leading_digit = re.compile(r"^\d")
-symbol_locks: Dict[str, asyncio.Lock] = {}
+symbol_locks: Dict[str, asyncio. Lock] = {}
 observed_flip_registry: Dict[Tuple[str, str, int], Dict[str, int]] = {}
 
 # ---------- Utilities ----------
@@ -160,7 +151,7 @@ async def _telegram_worker():
                     try:
                         data = r.json()
                     except Exception:
-                        data = {"raw_text": (r.text[:400] + "...") if r.text else ""}
+                        data = {"raw_text": (r.text[: 400] + "... ") if r.text else ""}
                     log("Telegram sent ok (worker) response:", data)
                 elif r.status_code == 429:
                     retry_after = 5
@@ -172,7 +163,7 @@ async def _telegram_worker():
                             retry_after = int(r.headers.get("Retry-After", retry_after))
                         except Exception:
                             pass
-                    log("Telegram send failed: 429 rate limit, retry after", retry_after)
+                    log("Telegram send failed:  429 rate limit, retry after", retry_after)
                     await asyncio.sleep(retry_after)
                     if attempt + 1 < TELEGRAM_RETRY_LIMIT:
                         await TELEGRAM_QUEUE.put((text, attempt + 1))
@@ -180,7 +171,7 @@ async def _telegram_worker():
                         log("Telegram send retry limit reached, dropping message")
                 else:
                     log("Telegram send failed:", r.status_code, r.text)
-                    if attempt + 1 < TELEGRAM_RETRY_LIMIT:
+                    if attempt + 1 < TELEGRAM_RETRY_LIMIT: 
                         backoff = min(60, (2 ** attempt))
                         await asyncio.sleep(backoff)
                         await TELEGRAM_QUEUE.put((text, attempt + 1))
@@ -188,11 +179,11 @@ async def _telegram_worker():
                         log("Telegram send retry limit reached, dropping message")
             except Exception as e:
                 log("Telegram worker error:", e)
-                if attempt + 1 < TELEGRAM_RETRY_LIMIT:
+                if attempt + 1 < TELEGRAM_RETRY_LIMIT: 
                     backoff = min(60, (2 ** attempt))
                     await asyncio.sleep(backoff)
                     await TELEGRAM_QUEUE.put((text, attempt + 1))
-                else:
+                else: 
                     log("Telegram send failed after retries, dropping")
             finally:
                 TELEGRAM_QUEUE.task_done()
@@ -207,8 +198,8 @@ async def send_telegram(text: str):
     global _TELEGRAM_WORKER_TASK
     if _TELEGRAM_WORKER_TASK is None or _TELEGRAM_WORKER_TASK.done():
         try:
-            _TELEGRAM_WORKER_TASK = asyncio.create_task(_telegram_worker())
-        except Exception:
+            _TELEGRAM_WORKER_TASK = asyncio. create_task(_telegram_worker())
+        except Exception: 
             pass
     try:
         await TELEGRAM_QUEUE.put((text, 0))
@@ -220,10 +211,10 @@ async def send_root_signals_telegram():
         log("Telegram not configured; skipping root signals telegram")
         return
     if not active_root_signals:
-        await send_telegram("Root signals: 0")
+        await send_telegram("Root signals:  0")
         return
-    lines = ["Root signals summary:"]
-    for sig in active_root_signals.values():
+    lines = ["Root signals summary: "]
+    for sig in active_root_signals. values():
         sym = sig.get("symbol")
         tf = sig.get("root_tf")
         status = sig.get("status", "watching")
@@ -232,7 +223,7 @@ async def send_root_signals_telegram():
 
 # ---------- Admin auth dependency ----------
 async def require_admin_auth(authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)):
-    if not ADMIN_API_KEY:
+    if not ADMIN_API_KEY: 
         log("WARNING: ADMIN_API_KEY not set — admin endpoints are UNPROTECTED.")
         return
     token = None
@@ -243,8 +234,8 @@ async def require_admin_auth(authorization: Optional[str] = Header(None), x_api_
         else:
             token = auth
     if x_api_key:
-        token = x_api_key.strip()
-    if not token or token != ADMIN_API_KEY:
+        token = x_api_key. strip()
+    if not token or token != ADMIN_API_KEY: 
         log("Admin auth failed")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
@@ -262,7 +253,7 @@ def ema(values: List[float], period: int) -> List[float]:
     return emas
 
 def macd_hist(prices: List[float], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL) -> List[Optional[float]]:
-    if len(prices) < slow + signal:
+    if len(prices) < slow + signal: 
         return []
     ema_fast = ema(prices, fast)
     ema_slow = ema(prices, slow)
@@ -273,13 +264,13 @@ def macd_hist(prices: List[float], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_S
     return [None] * padding + hist
 
 # ---------- Resilient public GET ----------
-async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = None, timeout: int = 12) -> Optional[Dict[str, Any]]:
+async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = None, timeout: int = 12) -> Optional[Dict[str, Any]]: 
     last_exc = None
     for attempt in range(PUBLIC_REQ_RETRIES):
         for host in API_HOSTS:
             for ep in endpoints:
                 url = host + ep
-                await PUBLIC_REQUEST_SEMAPHORE.acquire()
+                await PUBLIC_REQUEST_SEMAPHORE. acquire()
                 try:
                     try:
                         r = await httpx_client.get(url, params=params or {}, timeout=timeout)
@@ -294,7 +285,7 @@ async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = No
                         except Exception:
                             try:
                                 body = r.json()
-                                retry_after = int(body.get("parameters", {}).get("retry_after", retry_after))
+                                retry_after = int(body. get("parameters", {}).get("retry_after", retry_after))
                             except Exception:
                                 pass
                         log("Received 429 from", url, "retry_after", retry_after)
@@ -303,7 +294,7 @@ async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = No
                     if r.status_code == 200:
                         try:
                             return r.json()
-                        except Exception:
+                        except Exception: 
                             log("Invalid JSON from", url, "body excerpt:", (r.text[:400] + "...") if r.text else "")
                             continue
                     else:
@@ -322,13 +313,13 @@ async def resilient_public_get(endpoints: List[str], params: Dict[str, Any] = No
 
 # ---------- Signed request ----------
 def bybit_sign_v5(api_secret: str, timestamp: str, method: str, path: str, body: str) -> str:
-    prehash = timestamp + method.upper() + path + (body or "")
+    prehash = timestamp + method. upper() + path + (body or "")
     return hmac.new(api_secret.encode(), prehash.encode(), hashlib.sha256).hexdigest()
 
 async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, Any] = None):
     ts = str(int(time.time() * 1000))
     body = json.dumps(payload) if payload else ""
-    signature = bybit_sign_v5(BYBIT_API_SECRET or "", ts, method.upper(), endpoint, body)
+    signature = bybit_sign_v5(BYBIT_API_SECRET or "", ts, method. upper(), endpoint, body)
     headers = {
         "Content-Type": "application/json",
         "X-BAPI-API-KEY": BYBIT_API_KEY or "",
@@ -338,18 +329,18 @@ async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, An
     url = PRIMARY_API_HOST + endpoint
     for attempt in range(3):
         try:
-            if method.upper() == "GET":
+            if method. upper() == "GET":
                 r = await httpx_client.get(url, params=payload or {}, headers=headers, timeout=20)
             else:
                 r = await httpx_client.post(url, content=body or "{}", headers=headers, timeout=20)
             if r.status_code == 429:
                 retry_after = 5
                 try:
-                    retry_after = int(r.headers.get("Retry-After", retry_after))
+                    retry_after = int(r. headers.get("Retry-After", retry_after))
                 except Exception:
-                    try:
+                    try: 
                         body_json = r.json()
-                        retry_after = int(body_json.get("parameters", {}).get("retry_after", retry_after))
+                        retry_after = int(body_json. get("parameters", {}).get("retry_after", retry_after))
                     except Exception:
                         pass
                 log("Bybit signed request 429, retry_after", retry_after)
@@ -360,7 +351,7 @@ async def bybit_signed_request(method: str, endpoint: str, payload: Dict[str, An
             except Exception:
                 log("Signed request returned non-json", r.text)
                 return {}
-        except Exception as e:
+        except Exception as e: 
             log("Signed request error:", e)
             await asyncio.sleep(min(60, 2 ** attempt))
             continue
@@ -382,7 +373,7 @@ async def persist_root_signal(sig: Dict[str, Any]):
     comps = json.dumps(sig.get("components") or [])
     try:
         await db.execute("INSERT OR IGNORE INTO root_signals (id,symbol,root_tf,flip_time,flip_price,status,priority,signal_type,components,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (sig["id"], sig["symbol"], sig.get("root_tf"), sig.get("root_flip_time") or sig.get("flip_time"), sig.get("root_flip_price") or sig.get("flip_price"), sig.get("status", "watching"), sig.get("priority"), sig.get("signal_type", "root"), comps, sig.get("created_at")))
+                         (sig["id"], sig["symbol"], sig. get("root_tf"), sig.get("root_flip_time") or sig.get("flip_time"), sig.get("root_flip_price") or sig.get("flip_price"), sig.get("status", "watching"), sig.get("priority"), sig.get("signal_type", "root"), comps, sig.get("created_at")))
         await db.commit()
     except Exception as e:
         log("persist_root_signal DB error:", e)
@@ -394,7 +385,7 @@ async def remove_root_signal(sig_id: str):
 # ---------- Add / remove signals with improved notification and dedupe ----------
 async def add_signal(sig: Dict[str, Any]) -> bool:
     sid = sig["id"]
-    stype = sig.get("signal_type", "root")
+    stype = sig. get("signal_type", "root")
     sym = sig["symbol"]
     root_time = sig.get("root_flip_time") or sig.get("flip_time")
     lock = get_symbol_lock(sym)
@@ -403,12 +394,12 @@ async def add_signal(sig: Dict[str, Any]) -> bool:
             log("Duplicate signal suppressed (inside lock, by active_signal_index):", sym, stype)
             return False
         if stype == "root" and root_time is not None:
-            existing_recent = recent_root_signals.get(sym)
+            existing_recent = recent_root_signals. get(sym)
             if existing_recent == root_time:
                 log("Duplicate root signal suppressed by recent_root_signals:", sym, root_time)
                 return False
             for existing in active_root_signals.values():
-                if existing.get("symbol") == sym and existing.get("signal_type", "root") == stype:
+                if existing. get("symbol") == sym and existing.get("signal_type", "root") == stype:
                     if existing.get("root_flip_time") == root_time:
                         log("Duplicate existing signal found (inside lock):", sym, stype, root_time)
                         return False
@@ -431,12 +422,11 @@ async def add_signal(sig: Dict[str, Any]) -> bool:
             except Exception as e:
                 log("add_signal validation error:", e)
                 return False
-        if sid in active_root_signals:
+        if sid in active_root_signals: 
             log("Signal id already present, skipping:", sid)
             return False
         active_root_signals[sid] = sig
         register_signal_index(sym, stype)
-        # Change 1: store wall-clock time (cooldown timestamp) instead of candle start time
         if stype == "root":
             recent_root_signals[sym] = int(time.time())
         try:
@@ -444,20 +434,16 @@ async def add_signal(sig: Dict[str, Any]) -> bool:
         except Exception as e:
             log("persist_root_signal error:", e)
         log("Added signal:", sid, stype, sym)
-        # send per-signal update once per addition
         try:
             await send_telegram(f"Added signal: {sid} {stype} {sym}")
-        except Exception:
+        except Exception: 
             pass
 
-    # Out of lock: run subscription / prewarm and alignment notifier asynchronously in order
     try:
         async def _post_add_flow():
-            # For root signals: subscribe this symbol to 5m and 15m (active roots only)
             if stype == "root":
                 try:
                     global public_ws
-                    # subscribe to 5m and 15m for this symbol so MTF checks get live updates
                     if public_ws:
                         try:
                             await public_ws.subscribe_kline(sym, TF_MAP["5m"])
@@ -467,7 +453,6 @@ async def add_signal(sig: Dict[str, Any]) -> bool:
                             await public_ws.subscribe_kline(sym, TF_MAP["15m"])
                         except Exception as e:
                             log("Error subscribing 15m for", sym, e)
-                    # prewarm caches for the small TFs so alignment check sees data
                     try:
                         await asyncio.gather(
                             ensure_cached_candles(sym, "5m", MIN_CANDLES_REQUIRED),
@@ -477,14 +462,13 @@ async def add_signal(sig: Dict[str, Any]) -> bool:
                         log("Prewarm small TFs error for", sym, e)
                 except Exception as e:
                     log("post_add subscribe/prewarm error:", e)
-            # Finally, run notifier which will now find fresh cache and possibly alert
             try:
                 await notify_alignment_if_ready(sig)
-            except Exception as e:
+            except Exception as e: 
                 log("notify_alignment_if_ready post-add error:", e)
 
         asyncio.create_task(_post_add_flow())
-    except Exception:
+    except Exception: 
         pass
     return True
 
@@ -493,11 +477,10 @@ async def remove_signal(sig_id: str):
     if not sig:
         return
     stype = sig.get("signal_type", "root")
-    sym = sig.get("symbol")
+    sym = sig. get("symbol")
     if stype == "root":
-        # Change 2: cleanup with pop, we don't care about the candle timestamp here anymore
         try:
-            recent_root_signals.pop(sym, None)
+            recent_root_signals. pop(sym, None)
         except Exception:
             pass
     unregister_signal_index(sym, stype)
@@ -506,7 +489,6 @@ async def remove_signal(sig_id: str):
     except Exception:
         pass
 
-    # If we removed a root, unsubscribe 5m/15m for that symbol only if no other root remains
     if stype == "root":
         try:
             other_root_exists = any(x.get("symbol") == sym and x.get("signal_type") == "root" for x in active_root_signals.values())
@@ -520,13 +502,13 @@ async def remove_signal(sig_id: str):
                     await public_ws.unsubscribe_kline(sym, TF_MAP["15m"])
                 except Exception as e:
                     log("Error unsubscribing 15m for", sym, e)
-        except Exception:
+        except Exception: 
             pass
 
     log("Removed signal:", sig_id)
 
 # ---------- ensure_cached_candles ----------
-async def ensure_cached_candles(symbol: str, tf: str, required: int):
+async def ensure_cached_candles(symbol:  str, tf: str, required: int):
     token = TF_MAP[tf]
     dq = cache_get(symbol, token)
     if dq and len(dq) >= required and not cache_needs_refresh(symbol, token):
@@ -535,22 +517,21 @@ async def ensure_cached_candles(symbol: str, tf: str, required: int):
         fetched = await fetch_klines(symbol, token, limit=max(required * 2, required + 50))
         if fetched:
             merge_into_cache(symbol, token, fetched)
-            log(f"Updated cache for {symbol} {tf}: now {len(cache_get(symbol, token) or [])} candles")
+            log(f"Updated cache for {symbol} {tf}:  now {len(cache_get(symbol, token) or [])} candles")
     except Exception as e:
         log("ensure_cached_candles fetch error:", e)
 
-# ---------- Detect flip: OPEN ONLY ----------
+# ---------- Detect flip:  OPEN ONLY ----------
 async def detect_flip(symbol: str, tf: str) -> Tuple[Optional[str], Optional[int]]:
-    token = TF_MAP.get(tf) if tf in TF_MAP else tf
-    # allow passing token directly
+    token = TF_MAP. get(tf) if tf in TF_MAP else tf
     if token is None:
         token = TF_MAP.get(tf, tf)
     await ensure_cached_candles(symbol, tf, MIN_CANDLES_REQUIRED)
     dq = cache_get(symbol, token)
-    if not dq or len(dq) < MIN_CANDLES_REQUIRED:
+    if not dq or len(dq) < MIN_CANDLES_REQUIRED: 
         return None, None
     closes = candles_to_closes(dq)
-    if len(closes) < MACD_SLOW + MACD_SIGNAL:
+    if len(closes) < MACD_SLOW + MACD_SIGNAL: 
         return None, None
     hist = macd_hist(closes)
     if not hist or len(hist) < 2:
@@ -574,13 +555,13 @@ async def detect_flip(symbol: str, tf: str) -> Tuple[Optional[str], Optional[int
         return "open", last_start
     return None, None
 
-def flip_is_stable_enough(symbol: str, tf: str, start: int) -> bool:
+def flip_is_stable_enough(symbol: str, tf: str, start:  int) -> bool:
     if FLIP_STABILITY_SECONDS <= 0:
         return True
     token = TF_MAP.get(tf) if tf in TF_MAP else tf
     if token is None and tf in REVERSE_TF_MAP:
         token = tf
-    if token is None:
+    if token is None: 
         token = TF_MAP.get(tf, tf)
     key = (symbol, token, start)
     rec = observed_flip_registry.get(key)
@@ -591,11 +572,11 @@ def flip_is_stable_enough(symbol: str, tf: str, start: int) -> bool:
 # ---------- Raw WS persistence ----------
 async def persist_raw_ws(source: str, topic: str, message: str):
     try:
-        if not db:
+        if not db: 
             return
         await db.execute("INSERT INTO raw_ws_messages (source, topic, message, created_at) VALUES (?,?,?,?)", (source, topic, message, now_ts_ms()))
         await db.commit()
-    except Exception:
+    except Exception: 
         pass
 
 # ---------- Load persisted signals ----------
@@ -603,7 +584,7 @@ async def load_persisted_root_signals():
     try:
         async with db.execute("SELECT id,symbol,root_tf,flip_time,flip_price,status,priority,signal_type,components,created_at FROM root_signals") as cur:
             rows = await cur.fetchall()
-        max_flip_per_symbol: Dict[str,int] = {}
+        max_flip_per_symbol:  Dict[str,int] = {}
         loaded = 0
         for r in rows:
             try:
@@ -624,7 +605,7 @@ async def load_persisted_root_signals():
 
                 expired = False
                 try:
-                    if signal_type == "root" and root_tf and flip_time:
+                    if signal_type == "root" and root_tf and flip_time: 
                         token = TF_MAP.get(root_tf)
                         if token:
                             expiry = flip_time + interval_seconds_from_token(token)
@@ -651,30 +632,23 @@ async def load_persisted_root_signals():
                     "priority": priority,
                     "signal_type": signal_type,
                     "components": comps,
-                    "created_at": created_at,
+                    "created_at":  created_at,
                 }
                 register_signal_index(symbol, signal_type)
                 if symbol and flip_time:
-                    cur_max = max_flip_per_symbol.get(symbol)
-                    if cur_max is None or flip_time > cur_max:
-                        max_flip_per_symbol[symbol] = flip_time
+                    recent_root_signals[symbol] = int(time.time())
                 loaded += 1
-            except Exception:
+            except Exception: 
                 continue
-        for sym, t in max_flip_per_symbol.items():
-            try:
-                recent_root_signals[sym] = t
-            except Exception:
-                pass
-        log("Loaded", loaded, "persisted root signals from DB and seeded recent_root_signals")
-    except Exception as e:
+        log("Loaded", loaded, "persisted root signals from DB and seeded recent_root_signals with wall-clock cooldowns")
+    except Exception as e: 
         log("load_persisted_root_signals error:", e)
 
 # ---------- Notify persisted roots after startup ----------
 async def _notify_loaded_roots_after_startup():
     """
     After startup has loaded persisted root signals and WS/connect tasks have been started,
-    ensure subscriptions & caches for each persisted root and run the alignment notifier.
+    ensure subscriptions & caches for each persisted root and run the alignment notifier. 
 
     This will make persisted roots (loaded from DB) also trigger MTF alignment notifications.
     """
@@ -686,14 +660,12 @@ async def _notify_loaded_roots_after_startup():
             sym = sig.get("symbol")
             root_tf = sig.get("root_tf")
             try:
-                # Wait briefly for public_ws to be connected (bounded)
                 wait_attempts = 0
                 while wait_attempts < 8:
                     if public_ws and getattr(public_ws, "conn", None):
                         break
                     await asyncio.sleep(1)
                     wait_attempts += 1
-                # Subscribe small TFs (5m/15m) so notifier can see live updates
                 if public_ws:
                     try:
                         await public_ws.subscribe_kline(sym, TF_MAP["5m"])
@@ -703,19 +675,16 @@ async def _notify_loaded_roots_after_startup():
                         await public_ws.subscribe_kline(sym, TF_MAP["15m"])
                     except Exception as e:
                         log("Startup subscribe 15m error for", sym, e)
-                # Ensure caches for required TFs
                 tfs = tf_list_for_root(root_tf)
                 for tf in tfs:
                     try:
                         await ensure_cached_candles(sym, tf, MIN_CANDLES_REQUIRED)
                     except Exception as e:
                         log("Startup prewarm error for", sym, tf, e)
-                # Give a tiny moment for WS merges to occur if any in-flight
                 await asyncio.sleep(0.5)
-                # Run notifier
                 try:
                     await notify_alignment_if_ready(sig)
-                except Exception as e:
+                except Exception as e: 
                     log("Startup notify_alignment_if_ready error for", sym, e)
             except Exception as e:
                 log("notify_loaded_roots worker error for", sym, e)
@@ -729,7 +698,7 @@ async def _notify_loaded_roots_after_startup():
                     await _worker(s)
             tasks.append(asyncio.create_task(_wrap()))
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio. gather(*tasks, return_exceptions=True)
     except Exception as e:
         log("notify_loaded_roots_after_startup error:", e)
 
@@ -759,7 +728,7 @@ def log_current_root_signals():
 # ---------- Debug endpoints & startup glue ----------
 def init_app(fastapi_app):
     """
-    Register endpoints and startup event. Start background tasks by importing scanners lazily.
+    Register endpoints and startup event.  Start background tasks by importing scanners lazily.
     """
     global app
     app = fastapi_app
@@ -770,12 +739,12 @@ def init_app(fastapi_app):
 
     @app.get("/debug/check_symbol")
     async def debug_check_symbol(symbol: str, tf: str = "1h", _auth=Depends(require_admin_auth)):
-        if tf not in TF_MAP:
-            raise HTTPException(status_code=400, detail=f"Unknown timeframe {tf}. Valid: {list(TF_MAP.keys())}")
+        if tf not in TF_MAP: 
+            raise HTTPException(status_code=400, detail=f"Unknown timeframe {tf}.  Valid:  {list(TF_MAP. keys())}")
         token = TF_MAP[tf]
         await ensure_cached_candles(symbol, tf, MIN_CANDLES_REQUIRED)
         dq = cache_get(symbol, token)
-        if not dq:
+        if not dq: 
             return {"symbol": symbol, "tf": tf, "klines_count": 0, "error": "no cached klines"}
         closes = candles_to_closes(dq)
         hist = macd_hist(closes)
@@ -791,7 +760,7 @@ def init_app(fastapi_app):
             "tf": tf,
             "cached_klines": len(dq),
             "macd_hist_len": len(hist),
-            "macd_last": hist[-1] if hist else None,
+            "macd_last":  hist[-1] if hist else None,
             "flip_kind": flip_kind,
             "flip_ts": flip_ts,
             "last_closed": closed,
@@ -816,30 +785,28 @@ def init_app(fastapi_app):
             public_ws_connected = bool(public_ws and getattr(public_ws, "conn", None))
         except Exception:
             public_ws_connected = False
-        return {"status": "ok", "db": db_ok, "public_ws_connected": public_ws_connected, "time": datetime.now(timezone.utc).isoformat()}
+        return {"status": "ok", "db":  db_ok, "public_ws_connected": public_ws_connected, "time": datetime.now(timezone.utc).isoformat()}
 
-    # Debug endpoint you requested for manual subscribe testing.
     @app.post("/debug/ws/subscribe_test")
     async def debug_ws_subscribe_test(symbol: str, tf: str = "15m", _auth=Depends(require_admin_auth)):
         """
         Example: POST /debug/ws/subscribe_test?symbol=ETHUSDT&tf=15m
-        Will attempt to subscribe the public websocket to the kline topic for the given symbol/tf.
+        Will attempt to subscribe the public websocket to the kline topic for the given symbol/tf. 
         """
-        if tf not in TF_MAP:
+        if tf not in TF_MAP: 
             raise HTTPException(status_code=400, detail=f"Unknown tf {tf}. Valid: {list(TF_MAP.keys())}")
         if not public_ws:
             raise HTTPException(status_code=500, detail="public_ws not initialized")
         token = TF_MAP[tf]
-        topic = f"klineV2.{token}.{symbol}"
-        try:
+        topic = f"klineV2.{token}. {symbol}"
+        try: 
             await public_ws.subscribe_kline(symbol, token)
-            # prewarm cache (best-effort)
             try:
                 await ensure_cached_candles(symbol, tf, MIN_CANDLES_REQUIRED)
-            except Exception:
+            except Exception: 
                 pass
             return {"status": "ok", "subscribed": topic}
-        except Exception as e:
+        except Exception as e: 
             log("debug_ws_subscribe_test error:", e)
             raise HTTPException(status_code=500, detail=f"subscribe failed: {e}")
 
@@ -848,41 +815,37 @@ def init_app(fastapi_app):
         global public_ws, _TELEGRAM_WORKER_TASK
         await init_db()
         await load_persisted_root_signals()
-        log("Startup config:", "BYBIT_USE_MAINNET=", BYBIT_USE_MAINNET, "TRADING_ENABLED=", TRADING_ENABLED, "PUBLIC_WS_URL=", PUBLIC_WS_URL, "MIN_CANDLES_REQUIRED=", MIN_CANDLES_REQUIRED, "SKIP_DIGIT_PREFIX=", SKIP_DIGIT_PREFIX, "MIN_SYMBOL_AGE_MONTHS=", MIN_SYMBOL_AGE_MONTHS, "FLIP_STABILITY_SECONDS=", FLIP_STABILITY_SECONDS)
+        log("Startup config:", "BYBIT_USE_MAINNET=", BYBIT_USE_MAINNET, "TRADING_ENABLED=", TRADING_ENABLED, "PUBLIC_WS_URL=", PUBLIC_WS_URL, "MIN_CANDLES_REQUIRED=", MIN_CANDLES_REQUIRED, "FLIP_STABILITY_SECONDS=", FLIP_STABILITY_SECONDS)
 
-        # Import scanners lazily so scanners can import services at runtime without circular import problems.
         try:
             import scanners as _sc
-            # expose scanners' process_inprogress_update implementation to services (overrides placeholder)
             globals()['process_inprogress_update'] = _sc.process_inprogress_update
             public_ws = _sc.PublicWebsocketManager(PUBLIC_WS_URL)
-            ok = await public_ws.connect_and_detect(timeout=6.0)
-            if not ok:
+            ok = await public_ws.connect_and_detect(timeout=6. 0)
+            if not ok: 
                 log("Public WS detect warning")
-        except Exception:
+        except Exception: 
             log("Public WS connect error")
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and (_TELEGRAM_WORKER_TASK is None or _TELEGRAM_WORKER_TASK.done()):
             try:
                 _TELEGRAM_WORKER_TASK = asyncio.create_task(_telegram_worker())
-            except Exception:
+            except Exception: 
                 pass
 
-        # Start background scanner loops from scanners module
         try:
             import scanners as _sc
             asyncio.create_task(_sc.root_scanner_loop("1h"))
             asyncio.create_task(_sc.root_scanner_loop("4h"))
             asyncio.create_task(_sc.evaluate_signals_loop())
             asyncio.create_task(_sc.expire_signals_loop())
-            asyncio.create_task(_sc.periodic_root_logger())
+            asyncio. create_task(_sc.periodic_root_logger())
         except Exception as e:
             log("Error starting scanner background tasks:", e)
 
-        # Kick off post-startup notification for persisted roots (subscribes + prewarms + notifier)
         try:
             asyncio.create_task(_notify_loaded_roots_after_startup())
-        except Exception as e:
+        except Exception as e: 
             log("Failed to schedule notify_loaded_roots_after_startup:", e)
 
         log("Background tasks started")
