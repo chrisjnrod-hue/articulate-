@@ -1,5 +1,5 @@
 # scanners.py
-# Scanner loops + WebSocket manager + in-progress processing.
+# Scanner loops + WebSocket manager + in-progress processing. 
 # Imports services lazily inside functions to avoid circular import at module import.
 
 import asyncio
@@ -13,7 +13,7 @@ import websockets
 
 # Public websocket manager
 class PublicWebsocketManager:
-    def __init__(self, ws_url: str, detect_symbol: str = "BTCUSDT"):
+    def __init__(self, ws_url: str, detect_symbol:  str = "BTCUSDT"):
         self.ws_url = ws_url
         self.conn = None
         self.detect_template = None
@@ -30,11 +30,11 @@ class PublicWebsocketManager:
                 return msg
             if isinstance(msg, bytes):
                 try:
-                    return gzip.decompress(msg).decode("utf-8")
+                    return gzip. decompress(msg).decode("utf-8")
                 except Exception:
                     pass
                 try:
-                    return zlib.decompress(msg, -zlib.MAX_WBITS).decode("utf-8")
+                    return zlib. decompress(msg, -zlib.MAX_WBITS).decode("utf-8")
                 except Exception:
                     pass
                 try:
@@ -49,15 +49,15 @@ class PublicWebsocketManager:
         backoff = self._reconnect_backoff
         while not self._stop:
             try:
-                self.conn = await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10, max_size=2**24)
+                self.conn = await websockets.connect(self. ws_url, ping_interval=20, ping_timeout=10, max_size=2**24)
                 try:
                     import services as s
                     s.log("Public WS connected")
-                except Exception:
+                except Exception: 
                     pass
                 self._reconnect_backoff = 1
                 return True
-            except Exception as e:
+            except Exception as e: 
                 try:
                     import services as s
                     s.log("Public WS connect failed:", e, "retrying in", backoff)
@@ -67,7 +67,7 @@ class PublicWebsocketManager:
                 backoff = min(backoff * 2, 60)
         return False
 
-    async def connect_and_detect(self, timeout: float = 8.0):
+    async def connect_and_detect(self, timeout: float = 8. 0):
         if not await self._connect():
             return False
         from services import CANDIDATE_PUBLIC_TEMPLATES, TF_MAP
@@ -77,14 +77,14 @@ class PublicWebsocketManager:
                 t2 = tmpl.format(interval=TF_MAP["15m"], symbol=self.detect_symbol)
                 await self.conn.send(json.dumps({"op": "subscribe", "args": [t1, t2]}))
                 try:
-                    msg = await asyncio.wait_for(self.conn.recv(), timeout=1.0)
+                    msg = await asyncio.wait_for(self. conn.recv(), timeout=1.0)
                     body = self._maybe_decompress(msg)
                     if body and (self.detect_symbol in body or "kline" in body):
                         self.detect_template = tmpl
                         try:
                             import services as s
-                            s.log("Public WS template detected:", tmpl)
-                        except Exception:
+                            s. log("Public WS template detected:", tmpl)
+                        except Exception: 
                             pass
                         try:
                             await self.conn.send(json.dumps({"op": "unsubscribe", "args": [t1, t2]}))
@@ -93,7 +93,7 @@ class PublicWebsocketManager:
                         break
                 except Exception:
                     try:
-                        await self.conn.send(json.dumps({"op": "unsubscribe", "args": [t1, t2]}))
+                        await self.conn.send(json. dumps({"op": "unsubscribe", "args": [t1, t2]}))
                     except Exception:
                         pass
                     continue
@@ -104,23 +104,23 @@ class PublicWebsocketManager:
         return True
 
     async def subscribe_kline(self, symbol: str, interval_token: str):
-        topic = f"klineV2.{interval_token}.{symbol}"
+        topic = f"klineV2. {interval_token}. {symbol}"
         if topic in self.subscribed_topics:
             return
-        if not self.conn:
+        if not self. conn:
             connected = await self._connect()
             if not connected:
                 return
         try:
-            await self.conn.send(json.dumps({"op": "subscribe", "args": [topic]}))
+            await self.conn. send(json.dumps({"op": "subscribe", "args": [topic]}))
             self.subscribed_topics.add(topic)
             import services as s
             s.log("WS subscribed to", topic)
         except Exception as e:
             try:
                 import services as s
-                s.log("WS subscribe error:", e)
-            except Exception:
+                s. log("WS subscribe error:", e)
+            except Exception: 
                 pass
 
     async def unsubscribe_kline(self, symbol: str, interval_token: str):
@@ -128,19 +128,19 @@ class PublicWebsocketManager:
         Unsubscribe from a kline topic and remove it from subscribed_topics.
         """
         topic = f"klineV2.{interval_token}.{symbol}"
-        if topic not in self.subscribed_topics:
+        if topic not in self. subscribed_topics:
             return
         if not self.conn:
             # nothing to do if not connected
             self.subscribed_topics.discard(topic)
             return
         try:
-            await self.conn.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
+            await self. conn.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
             self.subscribed_topics.discard(topic)
             import services as s
-            s.log("WS unsubscribed from", topic)
+            s. log("WS unsubscribed from", topic)
         except Exception as e:
-            try:
+            try: 
                 import services as s
                 s.log("WS unsubscribe error:", e)
             except Exception:
@@ -153,17 +153,17 @@ class PublicWebsocketManager:
                     return gzip.decompress(msg).decode()
                 except Exception:
                     try:
-                        return zlib.decompress(msg, -zlib.MAX_WBITS).decode()
-                    except Exception:
+                        return zlib. decompress(msg, -zlib.MAX_WBITS).decode()
+                    except Exception: 
                         return msg.decode()
             return msg if isinstance(msg, str) else None
         except Exception:
             return None
 
-    def _extract_kline_entries(self, obj: Dict[str, Any]):
+    def _extract_kline_entries(self, obj:  Dict[str, Any]):
         out = []
         try:
-            data = obj.get("data") or obj.get("result") or []
+            data = obj. get("data") or obj.get("result") or []
             topic = obj.get("topic") or ""
             if isinstance(data, dict):
                 data = [data]
@@ -194,7 +194,7 @@ class PublicWebsocketManager:
                             if end_i > 10**12:
                                 end_i = end_i // 1000
                         close_f = float(close)
-                        out.append((symbol, str(interval), {"start": start_i, "end": end_i, "close": close_f}, bool(confirm)))
+                        out.append((symbol, str(interval), {"start": start_i, "end":  end_i, "close": close_f}, bool(confirm)))
                     except Exception:
                         continue
         except Exception:
@@ -216,10 +216,10 @@ class PublicWebsocketManager:
                     topic = obj.get("topic") or obj.get("arg", {}).get("topic") or ""
                     await persist_raw_ws("public", topic, json.dumps(obj))
                     entries = self._extract_kline_entries(obj)
-                    for symbol, interval_token, candle, is_closed in entries:
+                    for symbol, interval_token, candle, is_closed in entries: 
                         try:
                             merge_into_cache(symbol, str(interval_token), [candle])
-                            log("Merged kline from WS into cache for", symbol, interval_token, "start", candle.get("start"), "closed?", is_closed)
+                            log("Merged kline from WS into cache for", symbol, interval_token, "start", candle. get("start"), "closed? ", is_closed)
                             if not is_closed:
                                 # schedule in-progress processing
                                 asyncio.create_task(process_inprogress_update(symbol, str(interval_token)))
@@ -234,11 +234,11 @@ class PublicWebsocketManager:
                 except Exception:
                     print("Public WS recv error:", e)
                 try:
-                    if self.conn:
+                    if self. conn:
                         await self.conn.close()
                 except Exception:
                     pass
-                self.conn = None
+                self. conn = None
                 await asyncio.sleep(5)
                 try:
                     await self._connect()
@@ -249,7 +249,7 @@ class PublicWebsocketManager:
 async def process_inprogress_update(symbol: str, interval_token: str):
     import services as s
     try:
-        tf = s.REVERSE_TF_MAP.get(interval_token)
+        tf = s.REVERSE_TF_MAP. get(interval_token)
         if not tf:
             return
         # Only process mid-candle root-relevant frames for immediate root creation (1h,4h)
@@ -265,7 +265,7 @@ async def process_inprogress_update(symbol: str, interval_token: str):
         now_s = int(time.time())
         recent = s.recent_root_signals.get(symbol)
         if recent and (now_s - recent) < s.ROOT_DEDUP_SECONDS:
-            s.log("WS mid-candle: skipped (recent root dedup) for", symbol, "token", interval_token, f"age_s={now_s-recent}")
+            s.log("WS mid-candle:  skipped (recent root dedup) for", symbol, "token", interval_token, f"age_s={now_s-recent}")
             return
 
         if s.signal_exists_for(symbol, "root"):
@@ -285,14 +285,14 @@ async def process_inprogress_update(symbol: str, interval_token: str):
 
         # Only create root signals for 1h and 4h mid-candle flips
         dq_root = s.cache_get(symbol, s.TF_MAP[tf])
-        if not dq_root:
+        if not dq_root: 
             s.log("WS mid-candle: missing root cache after detect for", symbol, tf)
             return
         last_candle = list(dq_root)[-1]
         key = f"ROOT-{symbol}-{tf}-{last_start}"
         sig = {
             "id": key,
-            "symbol": symbol,
+            "symbol":  symbol,
             "root_tf": tf,
             "root_flip_time": last_start,
             "root_flip_price": last_candle.get("close"),
@@ -318,7 +318,7 @@ async def root_scanner_loop(root_tf: str):
     import services as s
     s.log("Root scanner started for", root_tf, "DISCOVERY_CONCURRENCY=", s.DISCOVERY_CONCURRENCY, "ROOT_DEDUP_SECONDS=", s.ROOT_DEDUP_SECONDS)
     semaphore = asyncio.Semaphore(s.DISCOVERY_CONCURRENCY)
-    # Run on a fixed schedule: each iteration starts SCAN_INTERVAL_SECONDS after previous iteration start.
+    # Run on a fixed schedule:  each iteration starts SCAN_INTERVAL_SECONDS after previous iteration start. 
     while True:
         iteration_start = time.time()
         try:
@@ -331,7 +331,7 @@ async def root_scanner_loop(root_tf: str):
                     await asyncio.sleep(sleep_for)
                 continue
 
-            # Ensure websocket subscriptions for this root timeframe (1h or 4h) for all symbols.
+            # Ensure websocket subscriptions for this root timeframe (1h or 4h) for all symbols. 
             # PublicWebsocketManager keeps subscribed_topics and will ignore duplicates.
             try:
                 if getattr(s, "public_ws", None):
@@ -359,7 +359,7 @@ async def root_scanner_loop(root_tf: str):
                 s.log("Prewarm error:", e)
 
             tasks = []
-            async def _detect_and_maybe_create(sym: str):
+            async def _detect_and_maybe_create(sym:  str):
                 async with semaphore:
                     try:
                         # Ensure cache is fresh for this symbol/tf before detection
@@ -375,8 +375,8 @@ async def root_scanner_loop(root_tf: str):
                         if s.signal_exists_for(sym, "root"):
                             s.log("Skipped symbol (already has active root):", sym)
                             return
-                        if s.signal_exists_for(sym, "entry"):
-                            s.log("Skipped symbol (already has active entry):", sym)
+                        if s. signal_exists_for(sym, "entry"):
+                            s. log("Skipped symbol (already has active entry):", sym)
                             return
 
                         flip_kind, last_start = await s.detect_flip(sym, root_tf)
@@ -385,7 +385,7 @@ async def root_scanner_loop(root_tf: str):
                         if not s.flip_is_stable_enough(sym, root_tf, last_start):
                             s.log("Skipped symbol (flip not yet stable):", sym, "tf=", root_tf, "start=", last_start)
                             return
-                        exists_same = any(x.get("symbol") == sym and x.get("signal_type") == "root" and x.get("root_flip_time") == last_start for x in s.active_root_signals.values())
+                        exists_same = any(x. get("symbol") == sym and x.get("signal_type") == "root" and x.get("root_flip_time") == last_start for x in s.active_root_signals. values())
                         if exists_same:
                             s.log("Skipped symbol (existing in-memory same root flip):", sym, last_start)
                             return
@@ -396,15 +396,15 @@ async def root_scanner_loop(root_tf: str):
                         last_candle = list(dq_root)[-1]
                         key = f"ROOT-{sym}-{root_tf}-{last_start}"
                         sig = {
-                            "id": key,
-                            "symbol": sym,
+                            "id":  key,
+                            "symbol":  sym,
                             "root_tf": root_tf,
-                            "root_flip_time": last_start,
+                            "root_flip_time":  last_start,
                             "root_flip_price": last_candle.get("close"),
                             "created_at": s.now_ts_ms(),
                             "status": "watching",
                             "priority": None,
-                            "signal_type": "root",
+                            "signal_type":  "root",
                             "components": [],
                             "flip_kind": flip_kind,
                         }
@@ -418,7 +418,7 @@ async def root_scanner_loop(root_tf: str):
                 tasks.append(asyncio.create_task(_detect_and_maybe_create(symbol)))
 
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio. gather(*tasks, return_exceptions=True)
 
         except Exception as e:
             s.log("root_scanner_loop outer error:", e)
@@ -427,7 +427,7 @@ async def root_scanner_loop(root_tf: str):
         elapsed = time.time() - iteration_start
         sleep_for = s.SCAN_INTERVAL_SECONDS - elapsed
         if sleep_for > 0:
-            await asyncio.sleep(sleep_for)
+            await asyncio. sleep(sleep_for)
 
 # ---------- Evaluate existing signals (root) for entry/trade ----------
 async def evaluate_signals_loop():
@@ -436,14 +436,15 @@ async def evaluate_signals_loop():
         try:
             ids = list(s.active_root_signals.keys())
             for sid in ids:
-                try:
-                    sig = s.active_root_signals.get(sid)
+                try: 
+                    sig = s.active_root_signals. get(sid)
                     if not sig:
                         continue
                     stype = sig.get("signal_type", "root")
                     symbol = sig.get("symbol")
                     root_tf = sig.get("root_tf")
-                    if s.is_stablecoin_symbol(symbol) or s.symbol_too_new(symbol):
+                    # REMOVED: only filter stablecoins, no age check
+                    if s.is_stablecoin_symbol(symbol):
                         await s.remove_signal(sid)
                         continue
                     if stype != "root":
@@ -454,8 +455,8 @@ async def evaluate_signals_loop():
                     for tf in required_tfs:
                         token = s.TF_MAP[tf]
                         dq = s.cache_get(symbol, token)
-                        if not dq or len(dq) < s.MIN_CANDLES_REQUIRED:
-                            tf_status[tf] = {"has": False}
+                        if not dq or len(dq) < s.MIN_CANDLES_REQUIRED: 
+                            tf_status[tf] = {"has":  False}
                             continue
                         closed = s.last_candle_is_closed(dq, token, safety_seconds=3)
                         closes = s.candles_to_closes(dq)
@@ -464,22 +465,22 @@ async def evaluate_signals_loop():
                         flip_last = True if flip_kind == "open" else False
                         last_ts_val = list(dq)[-1]["start"] if dq else None
                         tf_status[tf] = {"has": True, "closed": closed, "positive": positive, "flip_last": flip_last, "last_ts": last_ts_val, "flip_kind": flip_kind}
-                    if root_tf not in tf_status or not tf_status[root_tf].get("has"):
+                    if root_tf not in tf_status or not tf_status[root_tf]. get("has"):
                         continue
-                    if not tf_status[root_tf].get("flip_last"):
+                    if not tf_status[root_tf]. get("flip_last"):
                         continue
                     other_tfs = [tf for tf in required_tfs if tf != root_tf]
-                    negatives = [tf for tf in other_tfs if not tf_status.get(tf, {}).get("positive")]
+                    negatives = [tf for tf in other_tfs if not tf_status. get(tf, {}).get("positive")]
                     if len(negatives) > 1:
                         continue
                     if len(negatives) == 1:
                         tf_to_flip = negatives[0]
-                        st = tf_status.get(tf_to_flip, {})
+                        st = tf_status. get(tf_to_flip, {})
                         if not st.get("has"):
                             continue
-                        if not st.get("flip_last"):
+                        if not st. get("flip_last"):
                             continue
-                        for tf in other_tfs:
+                        for tf in other_tfs: 
                             if tf == tf_to_flip:
                                 continue
                             if not tf_status.get(tf, {}).get("positive"):
@@ -511,7 +512,7 @@ async def evaluate_signals_loop():
                         continue
                     # Notify that entry readiness achieved
                     try:
-                        await s.send_telegram(f"ENTRY ready: {symbol} root={root_tf} entry_id={entry_id}")
+                        await s.send_telegram(f"ENTRY ready:  {symbol} root={root_tf} entry_id={entry_id}")
                     except Exception:
                         pass
                     lock = s.get_symbol_lock(symbol)
@@ -533,10 +534,10 @@ async def evaluate_signals_loop():
                                 try:
                                     res = await s.bybit_signed_request("POST", "/v5/order/create", {"category": "linear", "symbol": symbol, "side": side, "orderType": "Market", "qty": qty})
                                     oid = res.get("result", {}).get("orderId", str(uuid.uuid4()))
-                                    await s.persist_trade({"id": oid, "symbol": symbol, "side": side, "qty": qty, "entry_price": None, "sl_price": stop_price, "created_at": s.now_ts_ms(), "open": True, "raw": res})
-                                    s.log("Placed real order", symbol, res)
+                                    await s.persist_trade({"id": oid, "symbol": symbol, "side": side, "qty": qty, "entry_price": None, "sl_price": stop_price, "created_at": s.now_ts_ms(), "open":  True, "raw":  res})
+                                    s. log("Placed real order", symbol, res)
                                     await s.send_telegram(f"Placed real order {symbol} qty={qty} side={side}")
-                                except Exception as e:
+                                except Exception as e: 
                                     s.log("Error placing real order:", e)
                             else:
                                 oid = str(uuid.uuid4())
@@ -552,7 +553,7 @@ async def evaluate_signals_loop():
                 except Exception as e:
                     s.log("evaluate_signals_loop error for", sid, e)
             await asyncio.sleep(max(5, s.SCAN_INTERVAL_SECONDS // 2))
-        except Exception as e:
+        except Exception as e: 
             s.log("evaluate_signals_loop outer error:", e)
             await asyncio.sleep(5)
 
@@ -570,8 +571,8 @@ async def expire_signals_loop():
                         root_tf = sig.get("root_tf")
                         flip_time = sig.get("root_flip_time") or sig.get("flip_time")
                         if root_tf and flip_time:
-                            token = s.TF_MAP.get(root_tf)
-                            if token:
+                            token = s.TF_MAP. get(root_tf)
+                            if token: 
                                 expiry = flip_time + s.interval_seconds_from_token(token)
                                 if now_s >= expiry:
                                     to_remove.append(sid)
@@ -581,11 +582,11 @@ async def expire_signals_loop():
                 try:
                     s.log("Expiring signal:", sid)
                     await s.remove_signal(sid)
-                except Exception as e:
+                except Exception as e: 
                     s.log("Error expiring signal", sid, e)
         except Exception as e:
             s.log("expire_signals_loop error:", e)
-        await asyncio.sleep(max(5, s.SCAN_INTERVAL_SECONDS // 2))
+        await asyncio. sleep(max(5, s.SCAN_INTERVAL_SECONDS // 2))
 
 # ---------- Periodic logger (runs as background task) ----------
 async def periodic_root_logger():
