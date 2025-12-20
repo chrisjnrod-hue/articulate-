@@ -1,5 +1,4 @@
-# scanners.py - COMPLETE & PRODUCTION READY
-# MTF root signal detection with immediate alignment evaluation
+# scanners.py - WITH AGGRESSIVE DEBUGGING FOR MTF ALIGNMENT
 
 import asyncio
 import gzip
@@ -16,7 +15,7 @@ _last_fetch_time: Dict[str, float] = {}
 
 
 class PublicWebsocketManager:  
-    def __init__(self, ws_url: str, detect_symbol:  str = "BTCUSDT"):
+    def __init__(self, ws_url: str, detect_symbol: str = "BTCUSDT"):
         self.ws_url = ws_url
         self.conn = None
         self.detect_template = None
@@ -28,7 +27,6 @@ class PublicWebsocketManager:
         self._stop = False
 
     def _maybe_decompress(self, msg):
-        """Decompress gzip or zlib encoded WebSocket messages."""
         try:
             if isinstance(msg, str):
                 return msg
@@ -50,7 +48,6 @@ class PublicWebsocketManager:
             return None
 
     async def _connect(self):
-        """Establish WebSocket connection with exponential backoff."""
         backoff = self._reconnect_backoff
         while not self._stop:
             try:
@@ -63,11 +60,11 @@ class PublicWebsocketManager:
                 try:
                     import services as s
                     s.log("Public WS connected")
-                except Exception: 
+                except Exception:  
                     pass
                 self._reconnect_backoff = 1
                 return True
-            except Exception as e: 
+            except Exception as e:  
                 try:
                     import services as s
                     s. log("Public WS connect failed:", e, "retrying in", backoff)
@@ -77,8 +74,7 @@ class PublicWebsocketManager:
                 backoff = min(backoff * 2, 60)
         return False
 
-    async def connect_and_detect(self, timeout: float = 8. 0):
-        """Connect and detect the correct WebSocket topic template."""
+    async def connect_and_detect(self, timeout: float = 8.0):
         if not await self._connect():
             return False
         from services import CANDIDATE_PUBLIC_TEMPLATES, TF_MAP
@@ -102,13 +98,13 @@ class PublicWebsocketManager:
                         except Exception:
                             pass
                         break
-                except Exception: 
+                except Exception:  
                     try:
                         await self.conn.send(json.dumps({"op": "unsubscribe", "args": [t1, t2]}))
                     except Exception:
                         pass
                     continue
-            except Exception: 
+            except Exception:  
                 continue
 
         if not self._recv_task:
@@ -116,16 +112,15 @@ class PublicWebsocketManager:
         return True
 
     async def subscribe_kline(self, symbol: str, interval_token: str):
-        """Subscribe to a kline topic."""
-        topic = f"klineV2.{interval_token}.{symbol}"
+        topic = f"klineV2.{interval_token}. {symbol}"
         if topic in self.subscribed_topics:
             return
         if not self.conn:
             connected = await self._connect()
-            if not connected: 
+            if not connected:  
                 return
-        try: 
-            await self.conn.send(json.dumps({"op": "subscribe", "args": [topic]}))
+        try:  
+            await self.conn. send(json.dumps({"op": "subscribe", "args": [topic]}))
             self.subscribed_topics.add(topic)
             _ws_subscriptions[symbol].add(interval_token)
             import services as s
@@ -134,33 +129,31 @@ class PublicWebsocketManager:
             try:
                 import services as s
                 s.log("WS subscribe error:", e)
-            except Exception: 
+            except Exception:  
                 pass
 
     async def unsubscribe_kline(self, symbol: str, interval_token: str):
-        """Unsubscribe from a kline topic."""
         topic = f"klineV2.{interval_token}.{symbol}"
         if topic not in self.subscribed_topics:
             return
         if not self.conn:
-            self. subscribed_topics.discard(topic)
+            self.subscribed_topics.discard(topic)
             _ws_subscriptions[symbol].discard(interval_token)
             return
-        try:
-            await self.conn.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
+        try: 
+            await self.conn.send(json.dumps({"op":  "unsubscribe", "args": [topic]}))
             self.subscribed_topics.discard(topic)
             _ws_subscriptions[symbol].discard(interval_token)
             import services as s
-            s.log("WS unsubscribed from", topic)
+            s. log("WS unsubscribed from", topic)
         except Exception as e:
-            try:
+            try: 
                 import services as s
                 s.log("WS unsubscribe error:", e)
-            except Exception:
+            except Exception: 
                 pass
 
     def _extract_kline_entries(self, obj: Dict[str, Any]):
-        """Extract kline entries from WebSocket message."""
         out = []
         try:
             data = obj. get("data") or obj.get("result") or []
@@ -202,7 +195,6 @@ class PublicWebsocketManager:
         return out
 
     async def _recv_loop(self):
-        """Receive and process WebSocket messages."""
         from services import merge_into_cache, persist_raw_ws, log
         while not self._stop:
             if not self.conn:
@@ -220,52 +212,50 @@ class PublicWebsocketManager:
                     for symbol, interval_token, candle, is_closed in entries:
                         try:
                             merge_into_cache(symbol, str(interval_token), [candle])
-                            log("Merged kline from WS into cache for", symbol, interval_token, "start", candle. get("start"), "closed? ", is_closed)
+                            log("Merged kline from WS into cache for", symbol, interval_token, "start", candle. get("start"), "closed?  ", is_closed)
                             asyncio.create_task(process_inprogress_update(symbol, str(interval_token)))
                             asyncio.create_task(_check_root_alignment(symbol))
-                        except Exception as e: 
+                        except Exception as e:  
                             log("Error processing kline entry:", e)
                             continue
-                except Exception as e: 
+                except Exception as e:  
                     log("WS message parse error:", e)
                     continue
-            except Exception as e:
+            except Exception as e: 
                 try:
                     import services as s
                     s.log("Public WS recv error:", e)
-                except Exception:
+                except Exception: 
                     print("Public WS recv error:", e)
                 try:
                     if self.conn:
                         await self.conn.close()
                 except Exception:
                     pass
-                self. conn = None
+                self.conn = None
                 await asyncio.sleep(5)
                 try:
                     await self._connect()
-                except Exception: 
+                except Exception:  
                     await asyncio.sleep(5)
 
 
 async def _check_root_alignment(symbol: str):
-    """Check if any root signal for this symbol is now aligned."""
     try:
         import services as s
-        for sig in list(s.active_root_signals.values()):
-            if sig.get("symbol") == symbol and sig.get("signal_type") == "root":
+        for sig in list(s.active_root_signals. values()):
+            if sig. get("symbol") == symbol and sig.get("signal_type") == "root":
                 try:
                     await _evaluate_root_signal_for_entry(sig)
-                except Exception: 
-                    pass
-    except Exception: 
+                except Exception as e:  
+                    s.log(f"_check_root_alignment error for {symbol}: {e}")
+    except Exception:  
         pass
 
 
-async def process_inprogress_update(symbol: str, interval_token: str):
-    """Process mid-candle updates for root flip detection."""
+async def process_inprogress_update(symbol: str, interval_token:  str):
     import services as s
-    try:
+    try: 
         tf = s. REVERSE_TF_MAP.get(interval_token)
         if not tf:
             return
@@ -274,17 +264,17 @@ async def process_inprogress_update(symbol: str, interval_token: str):
 
         try:
             await s.ensure_cached_candles(symbol, tf, s.MIN_CANDLES_REQUIRED)
-        except Exception:
+        except Exception: 
             pass
 
         now_s = int(time.time())
         recent = s.recent_root_signals.get(symbol)
         if recent and (now_s - recent) < s.ROOT_DEDUP_SECONDS:
-            s.log("WS mid-candle:  skipped (recent root dedup) for", symbol, "token", interval_token, f"age_s={now_s-recent}")
+            s.log("WS mid-candle:   skipped (recent root dedup) for", symbol, "token", interval_token, f"age_s={now_s-recent}")
             return
 
         if s.signal_exists_for(symbol, "root"):
-            s.log("WS mid-candle: skipped (already has active root) for", symbol)
+            s.log("WS mid-candle:  skipped (already has active root) for", symbol)
             return
         if s.signal_exists_for(symbol, "entry"):
             s.log("WS mid-candle: skipped (already has active entry) for", symbol)
@@ -300,7 +290,7 @@ async def process_inprogress_update(symbol: str, interval_token: str):
 
         dq_root = s.cache_get(symbol, s.TF_MAP[tf])
         if not dq_root:
-            s.log("WS mid-candle: missing root cache after detect for", symbol, tf)
+            s.log("WS mid-candle:  missing root cache after detect for", symbol, tf)
             return
         last_candle = list(dq_root)[-1]
         key = f"ROOT-{symbol}-{tf}-{last_start}"
@@ -322,7 +312,7 @@ async def process_inprogress_update(symbol: str, interval_token: str):
             s.log("WS mid-candle: Root signal created:", key)
             await _evaluate_root_signal_for_entry(sig)
         return
-    except Exception as e: 
+    except Exception as e:  
         try:
             s.log("process_inprogress_update error for", symbol, interval_token, e)
         except Exception:
@@ -330,62 +320,80 @@ async def process_inprogress_update(symbol: str, interval_token: str):
 
 
 async def _evaluate_root_signal_for_entry(sig: Dict[str, Any]):
-    """Evaluate a single root signal for MTF alignment and create entry if conditions met."""
+    """Evaluate a single root signal for MTF alignment."""
     import services as s
-    try: 
+    try:  
         symbol = sig.get("symbol")
         root_tf = sig.get("root_tf")
         stype = sig.get("signal_type")
 
         if stype != "root" or not symbol or not root_tf:
+            s.log(f"❌ MTF eval SKIP {symbol}:  invalid stype/symbol/root_tf")
             return
 
         if s.signal_exists_for(symbol, "entry"):
-            s.log(f"MTF eval SKIP {symbol}:  already has active entry")
+            s.log(f"❌ MTF eval SKIP {symbol}: already has active entry")
             return
 
         required_tfs = s.tf_list_for_root(root_tf)
-        s.log(f"MTF eval START {symbol} {root_tf}, required_tfs={required_tfs}")
+        s.log(f"🔍 MTF eval START {symbol} {root_tf}, required_tfs={required_tfs}")
 
-        await _ensure_root_signal_subscriptions(sig)
-        await asyncio.gather(*(s.ensure_cached_candles(symbol, tf, s.MIN_CANDLES_REQUIRED) for tf in required_tfs))
+        # ✅ FORCE subscribe to 5m/15m FIRST
+        s.log(f"🔌 FORCE subscribing {symbol} to 5m/15m...")
+        await _force_subscribe_small_tfs(symbol)
+        
+        # ✅ FORCE fetch all required TFs
+        s.log(f"📥 FORCE fetching all TFs for {symbol}...")
+        for tf in required_tfs: 
+            try:
+                await s. ensure_cached_candles(symbol, tf, s.MIN_CANDLES_REQUIRED)
+                s.log(f"  ✓ Fetched {symbol} {tf}")
+            except Exception as e:
+                s.log(f"  ✗ Fetch error {symbol} {tf}: {e}")
 
+        # ✅ Gather and log ALL TF status
         tf_status = {}
         for tf in required_tfs:
             token = s.TF_MAP[tf]
             dq = s.cache_get(symbol, token)
+            
+            s.log(f"  Checking {symbol} {tf}:  token={token}")
+            s.log(f"    Cache exists: {bool(dq)}, candles: {len(dq) if dq else 0}")
+            
             if not dq or len(dq) < s.MIN_CANDLES_REQUIRED:
-                tf_status[tf] = {"has":  False, "reason": "no_cache"}
-                s.log(f"  {tf}:  MISSING cache (has={bool(dq)}, len={len(dq) if dq else 0})")
+                tf_status[tf] = {"has":  False, "reason": "insufficient_cache", "candles": len(dq) if dq else 0}
+                s.log(f"    ❌ INSUFFICIENT ({len(dq) if dq else 0} < {s.MIN_CANDLES_REQUIRED})")
                 continue
 
             closes = s.candles_to_closes(dq)
             positive = s.macd_positive_from_closes(closes)
-            flip_kind, _ = await s.detect_flip(symbol, tf)
+            flip_kind, flip_ts = await s.detect_flip(symbol, tf)
             flip_last = (flip_kind == "open")
-            last_close = list(dq)[-1]["close"] if dq else None
 
             tf_status[tf] = {
                 "has": True,
                 "positive": positive,
                 "flip_last": flip_last,
                 "flip_kind": flip_kind,
-                "last_close": last_close,
-                "candle_count": len(dq)
+                "candle_count": len(dq),
+                "macd_last_hist": s.macd_hist(closes)[-1] if closes else None
             }
-            s.log(f"  {tf}: positive={positive}, flip_last={flip_last}, candle_count={len(dq)}")
+            s.log(f"    ✓ positive={positive}, flip_last={flip_last}, flip_kind={flip_kind}, candles={len(dq)}")
 
+        # ✅ Check alignment
         root_status = tf_status.get(root_tf, {})
+        s.log(f"  Root TF {root_tf} status: {root_status}")
+        
         if not root_status.get("has"):
-            s.log(f"MTF eval FAIL {symbol}:  root TF {root_tf} missing cache")
+            s.log(f"❌ MTF eval FAIL {symbol}: root TF {root_tf} missing cache")
             return
 
         if not root_status.get("flip_last"):
-            s.log(f"MTF eval FAIL {symbol}: root TF {root_tf} flip not open (is {root_status. get('flip_kind')})")
+            s.log(f"❌ MTF eval FAIL {symbol}: root TF {root_tf} flip not open (is {root_status. get('flip_kind')})")
             return
 
         other_tfs = [tf for tf in required_tfs if tf != root_tf]
-        negatives = [tf for tf in other_tfs if not tf_status.get(tf, {}).get("positive")]
+        negatives = [tf for tf in other_tfs if not tf_status. get(tf, {}).get("positive")]
 
         alignment_ok = False
         alignment_reason = ""
@@ -409,23 +417,24 @@ async def _evaluate_root_signal_for_entry(sig: Dict[str, Any]):
             alignment_reason = f"TOO_MANY_NEGATIVE({len(negatives)})"
 
         if not alignment_ok:
-            s. log(f"MTF eval FAIL {symbol}: alignment_reason={alignment_reason}")
+            s. log(f"❌ MTF eval FAIL {symbol}: alignment_reason={alignment_reason}, tf_status={tf_status}")
             return
 
-        s.log(f"✅ MTF eval SUCCESS {symbol} {root_tf}:  alignment_reason={alignment_reason}")
+        s.log(f"✅ MTF eval SUCCESS {symbol} {root_tf}: alignment_reason={alignment_reason}")
 
         if s.signal_exists_for(symbol, "entry"):
-            s.log(f"MTF entry SKIP {symbol}: entry already exists")
+            s.log(f"❌ MTF entry SKIP {symbol}: entry already exists")
             return
 
         if await s.has_open_trade(symbol):
-            s.log(f"MTF entry SKIP {symbol}: open trade exists")
+            s.log(f"❌ MTF entry SKIP {symbol}: open trade exists")
             return
 
+        # CREATE ENTRY SIGNAL
         ts = int(time.time())
         entry_id = f"ENTRY-{symbol}-{ts}"
         entry_sig = {
-            "id":  entry_id,
+            "id": entry_id,
             "symbol": symbol,
             "root_tf": root_tf,
             "signal_type": "entry",
@@ -438,17 +447,18 @@ async def _evaluate_root_signal_for_entry(sig: Dict[str, Any]):
         }
         added = await s.add_signal(entry_sig)
         if not added:
-            s.log(f"MTF entry SKIP {symbol}: failed to add entry signal")
+            s.log(f"❌ MTF entry SKIP {symbol}: failed to add entry signal")
             return
 
         try:
-            msg = f"✅ MTF ALIGNED:  {symbol} root={root_tf} reason={alignment_reason}"
+            msg = f"✅ MTF ALIGNED:   {symbol} root={root_tf} reason={alignment_reason}"
             s.log(msg)
             await s.send_telegram(msg)
-        except Exception: 
+        except Exception:  
             pass
 
-        lock = s.get_symbol_lock(symbol)
+        # EXECUTE TRADE
+        lock = s. get_symbol_lock(symbol)
         async with lock:
             if await s.has_open_trade(symbol):
                 s.log("MTF trade SKIP (post-lock):", symbol)
@@ -468,10 +478,10 @@ async def _evaluate_root_signal_for_entry(sig: Dict[str, Any]):
                     try:
                         import uuid
                         res = await s.bybit_signed_request("POST", "/v5/order/create", {"category": "linear", "symbol": symbol, "side": side, "orderType": "Market", "qty": qty})
-                        oid = res.get("result", {}).get("orderId", str(uuid.uuid4()))
+                        oid = res. get("result", {}).get("orderId", str(uuid.uuid4()))
                         await s.persist_trade({"id": oid, "symbol": symbol, "side": side, "qty": qty, "entry_price": None, "sl_price": stop_price, "created_at": s.now_ts_ms(), "open":  True, "raw": res})
-                        s.log("🚀 REAL ORDER:", symbol, qty, side)
-                        await s.send_telegram(f"🚀 REAL ORDER:  {symbol} qty={qty} side={side}")
+                        s. log("🚀 REAL ORDER:", symbol, qty, side)
+                        await s.send_telegram(f"🚀 REAL ORDER:   {symbol} qty={qty} side={side}")
                     except Exception as e: 
                         s.log("Error placing real order:", e)
                 else:
@@ -479,23 +489,49 @@ async def _evaluate_root_signal_for_entry(sig: Dict[str, Any]):
                     oid = str(uuid.uuid4())
                     await s.persist_trade({"id": oid, "symbol":  symbol, "side": side, "qty": qty, "entry_price": None, "sl_price":  stop_price, "created_at": s.now_ts_ms(), "open": True, "raw": {"simulated": True}})
                     s.log("📊 SIMULATED TRADE:", symbol, qty, side)
-                    await s.send_telegram(f"📊 SIMULATED:  {symbol} qty={qty} side={side}")
+                    await s.send_telegram(f"📊 SIMULATED:   {symbol} qty={qty} side={side}")
 
                 if entry_id in s.active_root_signals:
-                    s. active_root_signals[entry_id]["status"] = "acted"
+                    s.active_root_signals[entry_id]["status"] = "acted"
                     try:
                         await s.persist_root_signal(s.active_root_signals[entry_id])
-                    except Exception: 
+                    except Exception:
                         pass
 
     except Exception as e:
-        s.log(f"_evaluate_root_signal_for_entry error: {e}")
+        s.log(f"❌ _evaluate_root_signal_for_entry error: {e}", exc_info=True)
+
+
+# ✅ NEW:  FORCE subscribe to small TFs
+async def _force_subscribe_small_tfs(symbol:  str):
+    """Force subscribe to 5m/15m even if already subscribed."""
+    import services as s
+    try:
+        wait_count = 0
+        while wait_count < 10 and (not s.public_ws or not getattr(s. public_ws, "conn", None)):
+            await asyncio.sleep(0.5)
+            wait_count += 1
+
+        if not s.public_ws or not getattr(s.public_ws, "conn", None):
+            s.log(f"❌ WS not ready for {symbol}")
+            return
+
+        for tf in ["5m", "15m"]: 
+            token = s.TF_MAP. get(tf)
+            if token:
+                try:
+                    await s.public_ws.subscribe_kline(symbol, token)
+                    s.log(f"  Subscribed {symbol} {tf}")
+                    await asyncio.sleep(0.1)
+                except Exception as e: 
+                    s.log(f"  Error subscribing {symbol} {tf}: {e}")
+    except Exception as e:
+        s. log(f"_force_subscribe_small_tfs error: {e}")
 
 
 async def _continuous_root_signal_subscriptions():
-    """Continuously maintain 5m/15m subscriptions for all active root signals."""
     import services as s
-    s.log("Root signal subscription maintenance loop started, interval=30s")
+    s.log("Root signal subscription maintenance loop started")
 
     while True:
         iteration_start = time.time()
@@ -503,23 +539,23 @@ async def _continuous_root_signal_subscriptions():
             current_roots = set()
             for sig in s.active_root_signals. values():
                 if sig.get("signal_type") == "root":
-                    current_roots.add(sig.get("symbol"))
+                    current_roots.add(sig. get("symbol"))
 
             sem = asyncio.Semaphore(10)
 
             async def _ensure_subs(sym):
-                async with sem: 
+                async with sem:  
                     try:
-                        if not s.public_ws or not getattr(s. public_ws, "conn", None):
+                        if not s.public_ws or not getattr(s.public_ws, "conn", None):
                             return
-                        for tf in ["5m", "15m"]: 
-                            token = s.TF_MAP. get(tf)
+                        for tf in ["5m", "15m"]:  
+                            token = s. TF_MAP.get(tf)
                             if token: 
                                 try:
                                     await s.public_ws.subscribe_kline(sym, token)
-                                except Exception: 
+                                except Exception:  
                                     pass
-                    except Exception:
+                    except Exception: 
                         pass
 
             if current_roots:
@@ -527,14 +563,14 @@ async def _continuous_root_signal_subscriptions():
 
             try:
                 symbols = await s.get_tradable_usdt_symbols()
-                for sym in symbols[: 50]: 
+                for sym in symbols[: 50]:  
                     try:
                         if not s.public_ws or not getattr(s.public_ws, "conn", None):
                             break
                         await s.public_ws.subscribe_kline(sym, s.TF_MAP["1h"])
-                    except Exception: 
+                    except Exception:  
                         pass
-            except Exception:
+            except Exception: 
                 pass
 
         except Exception as e:
@@ -546,19 +582,18 @@ async def _continuous_root_signal_subscriptions():
 
 
 async def _continuous_kline_fetcher(root_tf: str):
-    """Continuously fetch klines for root timeframe at each scan interval."""
     import services as s
-    s.log(f"Kline fetcher started for {root_tf} at {s. SCAN_INTERVAL_SECONDS}s interval")
+    s.log(f"Kline fetcher started for {root_tf}")
 
     while True:
         iteration_start = time.time()
         try:
             symbols = await s.get_tradable_usdt_symbols()
             if not symbols:
-                s.log(f"Kline fetcher {root_tf}:  no symbols available")
+                s.log(f"Kline fetcher {root_tf}:  no symbols")
             else:
                 async def _fetch_for_symbol(sym):
-                    try: 
+                    try:  
                         await s.ensure_cached_candles(sym, root_tf, s.MIN_CANDLES_REQUIRED)
                     except Exception:
                         pass
@@ -575,10 +610,10 @@ async def _continuous_kline_fetcher(root_tf: str):
                 )
 
                 elapsed_work = time.time() - iteration_start
-                s.log(f"Kline refresh completed for {root_tf}:  {len(symbols)} symbols in {elapsed_work:. 2f}s")
+                s.log(f"Kline refresh {root_tf}:  {len(symbols)} symbols in {elapsed_work:.2f}s")
 
         except Exception as e:
-            s.log(f"Kline fetcher error for {root_tf}: {e}")
+            s.log(f"Kline fetcher error {root_tf}: {e}")
 
         elapsed = time.time() - iteration_start
         sleep_for = max(1, s.SCAN_INTERVAL_SECONDS - elapsed)
@@ -586,9 +621,7 @@ async def _continuous_kline_fetcher(root_tf: str):
 
 
 async def _ensure_root_signal_subscriptions(signal_dict: Dict[str, Any]):
-    """For each root signal, ensure 5m/15m are subscribed and cached."""
     import services as s
-
     symbol = signal_dict.get("symbol")
     root_tf = signal_dict.get("root_tf")
 
@@ -597,25 +630,25 @@ async def _ensure_root_signal_subscriptions(signal_dict: Dict[str, Any]):
 
     try:
         wait_count = 0
-        while wait_count < 5 and (not s.public_ws or not getattr(s.public_ws, "conn", None)):
+        while wait_count < 5 and (not s.public_ws or not getattr(s. public_ws, "conn", None)):
             await asyncio.sleep(0.5)
             wait_count += 1
 
         if not s.public_ws or not getattr(s.public_ws, "conn", None):
-            s.log(f"Public WS not ready for {symbol} signal subscriptions")
+            s.log(f"Public WS not ready for {symbol}")
             return
 
         for tf in ["5m", "15m"]:
             token = s.TF_MAP.get(tf)
-            if token: 
+            if token:
                 try:
                     await s.public_ws.subscribe_kline(symbol, token)
                     await asyncio.sleep(0.2)
-                except Exception as e:
+                except Exception as e: 
                     s.log(f"Error subscribing {symbol} {tf}: {e}")
 
         required_tfs = s.tf_list_for_root(root_tf)
-        for tf in required_tfs: 
+        for tf in required_tfs:  
             try:
                 await s.ensure_cached_candles(symbol, tf, s.MIN_CANDLES_REQUIRED)
             except Exception as e:
@@ -625,9 +658,8 @@ async def _ensure_root_signal_subscriptions(signal_dict: Dict[str, Any]):
 
 
 async def root_scanner_loop(root_tf: str):
-    """Main root flip detection loop with guaranteed scan intervals."""
     import services as s
-    s.log(f"Root scanner started for {root_tf}, interval={s.SCAN_INTERVAL_SECONDS}s")
+    s.log(f"Root scanner started for {root_tf}")
     semaphore = asyncio.Semaphore(s.DISCOVERY_CONCURRENCY)
 
     while True:
@@ -637,14 +669,14 @@ async def root_scanner_loop(root_tf: str):
             now_s = int(time.time())
 
             if not symbols:
-                s.log(f"Root scanner {root_tf}: no symbols available")
+                s.log(f"Root scanner {root_tf}:  no symbols")
             else:
                 try:
                     if getattr(s, "public_ws", None):
                         async def _ensure_ws_sub(sym):
                             async with semaphore:
                                 try:
-                                    await s.public_ws.subscribe_kline(sym, s.TF_MAP[root_tf])
+                                    await s. public_ws.subscribe_kline(sym, s.TF_MAP[root_tf])
                                 except Exception:
                                     pass
                         await asyncio.gather(*[_ensure_ws_sub(sym) for sym in symbols[: 100]], return_exceptions=True)
@@ -654,13 +686,13 @@ async def root_scanner_loop(root_tf: str):
                 async def _prewarm(sym):
                     async with semaphore:
                         try:
-                            await s. ensure_cached_candles(sym, root_tf, s.MIN_CANDLES_REQUIRED)
+                            await s.ensure_cached_candles(sym, root_tf, s.MIN_CANDLES_REQUIRED)
                         except Exception:
                             pass
                 try:
                     await asyncio. gather(*[_prewarm(sym) for sym in symbols], return_exceptions=True)
                 except Exception as e:
-                    s.log(f"Prewarm error:  {e}")
+                    s.log(f"Prewarm error: {e}")
 
                 tasks = []
 
@@ -672,7 +704,7 @@ async def root_scanner_loop(root_tf: str):
                             except Exception:
                                 pass
 
-                            recent = s.recent_root_signals. get(sym)
+                            recent = s.recent_root_signals.get(sym)
                             if recent and (now_s - recent) < s.ROOT_DEDUP_SECONDS:
                                 return
                             if s.signal_exists_for(sym, "root"):
@@ -681,12 +713,12 @@ async def root_scanner_loop(root_tf: str):
                                 return
 
                             flip_kind, last_start = await s.detect_flip(sym, root_tf)
-                            if not flip_kind: 
+                            if not flip_kind:
                                 return
                             if not s.flip_is_stable_enough(sym, root_tf, last_start):
                                 return
-                            exists_same = any(x.get("symbol") == sym and x.get("signal_type") == "root" and x.get("root_flip_time") == last_start for x in s.active_root_signals.values())
-                            if exists_same: 
+                            exists_same = any(x. get("symbol") == sym and x.get("signal_type") == "root" and x.get("root_flip_time") == last_start for x in s.active_root_signals.values())
+                            if exists_same:
                                 return
                             dq_root = s.cache_get(sym, s.TF_MAP[root_tf])
                             if not dq_root:
@@ -707,7 +739,7 @@ async def root_scanner_loop(root_tf: str):
                                 "flip_kind": flip_kind,
                             }
                             added = await s.add_signal(sig)
-                            if added:
+                            if added: 
                                 s.log("Root signal created:", key)
                                 await _evaluate_root_signal_for_entry(sig)
                         except Exception as e:
@@ -719,9 +751,6 @@ async def root_scanner_loop(root_tf: str):
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
-                elapsed_work = time.time() - iteration_start
-                s.log(f"Root scanner {root_tf} iteration completed in {elapsed_work:.2f}s")
-
         except Exception as e:
             s.log(f"root_scanner_loop {root_tf} error: {e}")
 
@@ -731,15 +760,13 @@ async def root_scanner_loop(root_tf: str):
 
 
 async def evaluate_signals_loop():
-    """Check for new root signals and evaluate them for alignment."""
     import services as s
-    s.log("evaluate_signals_loop started (secondary check)")
+    s.log("evaluate_signals_loop started")
 
     while True:
         iteration_start = time.time()
         try:
             ids = list(s.active_root_signals.keys())
-            count_checked = 0
             for sid in ids:
                 try: 
                     sig = s.active_root_signals. get(sid)
@@ -755,27 +782,21 @@ async def evaluate_signals_loop():
                         continue
 
                     if not s. signal_exists_for(symbol, "entry"):
-                        count_checked += 1
                         await _evaluate_root_signal_for_entry(sig)
 
                 except Exception as e:
                     s.log("evaluate_signals_loop error for", sid, e)
 
-            if count_checked > 0:
-                s.log(f"evaluate_signals_loop secondary check evaluated {count_checked} signals")
-
-        except Exception as e: 
+        except Exception as e:  
             s.log("evaluate_signals_loop outer error:", e)
 
-        elapsed = time.time() - iteration_start
+        elapsed = time. time() - iteration_start
         sleep_for = max(5, (s.SCAN_INTERVAL_SECONDS // 2) - elapsed)
         await asyncio.sleep(sleep_for)
 
 
 async def expire_signals_loop():
-    """Expire root signals based on candle interval."""
     import services as s
-    s.log("expire_signals_loop started, interval=half SCAN_INTERVAL_SECONDS")
 
     while True:
         iteration_start = time.time()
@@ -788,13 +809,13 @@ async def expire_signals_loop():
                     if stype == "root":
                         root_tf = sig.get("root_tf")
                         flip_time = sig.get("root_flip_time") or sig.get("flip_time")
-                        if root_tf and flip_time: 
+                        if root_tf and flip_time:  
                             token = s.TF_MAP. get(root_tf)
-                            if token: 
+                            if token:
                                 expiry = flip_time + s.interval_seconds_from_token(token)
                                 if now_s >= expiry:
                                     to_remove.append(sid)
-                except Exception:
+                except Exception: 
                     continue
             for sid in to_remove: 
                 try:
@@ -811,7 +832,6 @@ async def expire_signals_loop():
 
 
 async def periodic_root_logger():
-    """Log current root signals periodically."""
     import services as s
     s.log("periodic_root_logger started")
 
